@@ -19,6 +19,17 @@ from random import shuffle, sample, choice
 from multiprocessing import Process, Pool, TimeoutError
 from urllib2 import Request, urlopen, URLError, build_opener, HTTPHandler, HTTPError
 
+try:
+    import MySQLdb as SQL
+except ImportError:
+    print "MySQL not detected, attempting to install automatically..."
+    runCmd(['yum','-q','-y','install','MySQL-python'])
+    try:
+        import MySQLdb as SQL
+        print "Imported MySQL properly."
+    except:
+        print "Couldn't install/import MySQL. Please run `yum -y install MySQL-python`."
+        raise
 
 now = datetime.datetime.now();
 LOG_FILE = 'burnin.{}-{}-{}_{}-{}{}.log'.format(now.year, now.month, now.day, now.hour%12, now.minute,'pm' if now.hour/12 else 'am')
@@ -30,6 +41,9 @@ testFailures = 0;
 SSH_OPTIONS="-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30"
 
 DATA_FILE="IOPSTest.out"
+BATCHES_OUTPUT_FILE="batches.out"
+CONFIG_FILE="burnin.pyconf"
+
 
 
 ONAPP_ROOT = '/onapp'
@@ -76,8 +90,10 @@ def avg(l,round_to=False):
     if type(l) is not list: raise TypeError('List required')
     try: sum(l)
     except TypeError: raise TypeError('List contains non-number value')
-    if round_to: return round(sum(l)/len(l), round_to)
-    else: return sum(l)/len(l)
+    try:
+        if round_to: return round(sum(l)/len(l), round_to)
+        else: return sum(l)/len(l)
+    except ZeroDivisionError: return False;
 
 def errorCheck(err, contFlag=True):
     global testVMs;
@@ -125,6 +141,9 @@ arp.add_argument("-b", "--batch", metavar='N', help="Enables Batches mode; picks
 arp.add_argument("-p", "--pretest", metavar='N', help="Number of minutes to run a burnin pretest, which will run disk workloads on all VMs", default=False);
 arp.add_argument("-z", "--zzzz", help="Continue working with EVERY virtual machine on the cloud right now. Dev use mainly. Implies -k", action="store_true", default=False)
 arp.add_argument("-k", "--keep", help="Keep VMs; Do not delete VMs used for testing at end of test. -z/--zzzz option implies this.", action="store_true", default=False)
+arp.add_argument("-g", "--generate", metavar='F', help="Generate output from batch data, in the case of previous failure but you still want the data in proper format.", default=False)
+arp.add_argument("-t", "--token", metavar='T', help="Token for submitting to the architecture portal.", default=False)
+arp.add_argument("-u", "--user", metavar='U', help="User ID which has API key and permissions. Default is 1 (admin).", default=1)
 args = arp.parse_args();
 VERBOSE=args.verbose;
 quiet=args.quiet;
@@ -136,7 +155,11 @@ autoyes=args.yes;
 use_existing_virtual_machines=args.zzzz;
 DELETE_VMS=not args.keep;
 if use_existing_virtual_machines: DELETE_VMS=False;
-run_pre_burnin_test=args.pretest
+run_pre_burnin_test=args.pretest;
+SEND_RESULTS = args.token
+USER_ID=args.user;
+
+ONLY_GENERATE_OUTPUT=args.generate;
 
 FAILURE_LIMIT=25
 FALURES=0
@@ -149,8 +172,6 @@ def logger(s):
     l.flush();
     l.close();
     # if VERBOSE: print text.rstrip();
-
-
 
 def pullDBConfig(f):
     confDict = {};
@@ -194,7 +215,7 @@ def dbConn(conf=None):
 def pullAPIKey():
     db = dbConn();
     cur = db.cursor();
-    cur.execute("SELECT api_key FROM users WHERE id=1");
+    cur.execute("SELECT api_key FROM users WHERE id={}".format(USER_ID));
     res = cur.fetchone()[0];
     cur.close();
     db.close();
@@ -207,7 +228,7 @@ def pullAPIKey():
 def pullAPIEmail():
     db = dbConn();
     cur = db.cursor();
-    cur.execute("SELECT email FROM users WHERE id=1");
+    cur.execute("SELECT email FROM users WHERE id={}".format(USER_ID));
     res = cur.fetchone()[0];
     cur.close();
     db.close();
@@ -234,7 +255,9 @@ def runCmd(cmd, shell=False, shlexy=True):
     if shlexy and type(cmd) is str:
         cmd = shlex.split(cmd)
     stdout, stderr = subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate();
-    if stderr: logger("Command {} failed, stderr: {}".format(cmd, stderr.strip()))
+    if stderr and 'Warning: Permanently added' not in stderr:
+        logger("Command {} failed, stderr: {}".format(cmd, stderr.strip()))
+        return False;
     return stdout.strip();
 
 def __runJob__(j):
@@ -346,7 +369,7 @@ def CreateIncrementalBackup(data):
     checkKeys(data, ['vm_id'])
     url = '/virtual_machines/{}/backups.json'.format(data['vm_id'])
     if 'note' in data.keys():
-        r = apiCall(url, data=json.dumps({"backup:":{"note":data['note']}}), method='POST')
+        r = apiCall(url, data={"backup:":{"note":data['note']}}, method='POST')
     else:
         r = apiCall(url, method='POST')
     return r[0];
@@ -355,7 +378,7 @@ def CreateDiskBackup(data):
     checkKeys(data, ['disk_id'])
     url = '/settings/disks/{}/backups.json'.format(data['disk_id'])
     if 'note' in data.keys():
-        r = apiCall(url, data=json.dumps({"backup:":{"note":data['note']}}), method='POST')
+        r = apiCall(url, data={"backup:":{"note":data['note']}}, method='POST')
     else:
         r = apiCall(url, method='POST')
     return r;
@@ -414,7 +437,7 @@ def CreateVM(data):
       'template_id']
     checkKeys(data, reqKeys)
     url = '/virtual_machines.json'
-    r = apiCall(url, data=json.dumps({"virtual_machine":data}), method='POST')
+    r = apiCall(url, data={"virtual_machine":data}, method='POST')
     return r
 
 def BuildVM(data):
@@ -423,7 +446,7 @@ def BuildVM(data):
     url = '/virtual_machines/{}/build.json'.format(data['vm_id'])
     datanoid = dict(data)
     del datanoid['vm_id'];
-    r = apiCall(url, data=json.dumps({"virtual_machine":datanoid}), method='POST')
+    r = apiCall(url, data={"virtual_machine":datanoid}, method='POST')
     return r;
 
 def EditVM(data):
@@ -431,7 +454,7 @@ def EditVM(data):
     url = '/virtual_machines/{}.json'.format(data['vm_id'])
     datanoid = dict(data)
     del datanoid['vm_id'];
-    r = apiCall(url, data=json.dumps({"virtual_machine":datanoid}), method='POST')
+    r = apiCall(url, data={"virtual_machine":datanoid}, method='POST')
     return r;
 
 
@@ -447,7 +470,7 @@ def MigrateVM(data):
     url = '/virtual_machines/{}/migration.json'.format(data['vm_id'])
     datanoid = dict(data)
     del datanoid['vm_id']
-    r = apiCall(url, data=json.dumps({"virtual_machine":datanoid}), method='POST')
+    r = apiCall(url, data={"virtual_machine":datanoid}, method='POST')
     return r;
 
 def DeleteVM(data):
@@ -469,7 +492,7 @@ def StartVM(data):
     checkKeys(data, ['vm_id'])
     url = '/virtual_machines/{}/startup.json'.format(data['vm_id'])
     if 'recovery' in data.keys() and data['recovery'] == True:
-        r = apiCall(url, data=json.dumps({"mode":"recovery"}), method='POST')
+        r = apiCall(url, data={"mode":"recovery"}, method='POST')
     else:
         r = apiCall(url, method='POST')
     return r;
@@ -509,7 +532,7 @@ def EditDisk(data):
     url = '/settings/disks/{}.json'.format(data['disk_id'])
     datanoid = dict(data)
     del datanoid['disk_id']
-    r = apiCall(url, data=json.dumps({"disk":datanoid}), method='PUT')
+    r = apiCall(url, data={"disk":datanoid}, method='PUT')
     return r;
 
 def GetDiskIOPS(data):
@@ -733,7 +756,7 @@ class Job(object):
                 raise ValueError('{} is not valid for a Job action.'.format(self.action))
             try:
                 data = globals()[self.action](self.data);
-            except OnappError as err:
+            except OnappException as err:
                 print "Error in job {}"
                 if not CONTINUE_MODE: raise
                 FAILURES += 1
@@ -756,7 +779,7 @@ class Job(object):
                 raise ValueError('{} is not valid for a Job action.'.format(self.action))
             try:
                 data = globals()[self.action](self.data);
-            except OnappError as err:
+            except OnappException as err:
                 print "Error in job {}"
                 if not CONTINUE_MODE: raise
                 FAILURES += 1
@@ -791,7 +814,7 @@ def apiCall(r, data=None, method='GET', target=API_TARGET, auth=API_AUTH):
             response = urlopen(req)
     except HTTPError as err:
         caller = inspect.stack()[1][3];
-        print caller,"called erroneous API request: {}{}, error: ".format(target, r, err)
+        print caller,"called erroneous API request: {}{}, error: {}".format(target, r, err)
         return False;
     status = response.getcode()
     if VERBOSE and 'status.json' not in r: logger('API Call executed - {}{}, Status code: {}'.format(API_TARGET, r, status));
@@ -1069,7 +1092,7 @@ def BatchWorkload(vms, duration, params):
     rData = { vm['id'] : Job('GetVMWorkloadLog', vm).run() for vm in vms }
     return rData;
 
-def stallUntilOnline(vms, timeout=3600, bTime=None):
+def stallUntilOnline(vms, timeout=600, bTime=None):
     if type(vms) is dict:
         vm_ids = {vms['id']:False}
     elif type(vms) is int or type(vms) is long:
@@ -1092,9 +1115,16 @@ def stallUntilOnline(vms, timeout=3600, bTime=None):
         else: jobData = runAll(jobs)
         for j in jobData:
             if j['booted'] and j['built'] and not j['locked']:
+                VM_IP = dsql("SELECT INET_NTOA(ip.address) FROM virtual_machines AS vm \
+                    JOIN networking_network_interfaces AS nif ON nif.virtual_machine_id = vm.id \
+                    JOIN networking_ip_address_joins AS nipj ON nipj.network_interface_id = nif.id \
+                    JOIN networking_ip_addresses AS ip ON ip.id = nipj.ip_address_id \
+                    WHERE vm.id={}".format(j['id']))
+                cmd = ['su','onapp','-c','ssh {} root@{} "uptime"'.format(SSH_OPTIONS, VM_IP)]
+                status = runCmd(cmd)
+                if status is False: continue;
                 vm_ids[j['id']] = True;
         time.sleep(1)
-    time.sleep(1)
 
 def stallUntilOffline(vms, timeout=3600, bTime=None):
     if type(vms) is dict:
@@ -1118,7 +1148,9 @@ def stallUntilOffline(vms, timeout=3600, bTime=None):
         if len(jobs) > 1: jobData = runParallel(jobs)
         else: jobData = runAll(jobs)
         for j in jobData:
-            if not j['booted'] and not j['locked']:
+            if j is False:
+                vm_ids[j['id']] = True
+            elif not j['booted'] and not j['locked']:
                 vm_ids[j['id']] = True;
         time.sleep(1)
     time.sleep(1)
@@ -1144,8 +1176,10 @@ def stallUntilDeleted(vms, timeout=3600, bTime=None):
         jobs = [ Job('VMStatus', {'vm_id':vm}) for vm in vm_ids.keys() if not vm_ids[vm] ]
         for j in jobs:
             try:
-                j.run()
+                tmp = j.run()
             except HTTPError:
+                vm_ids[j.data['vm_id']] = True
+            if tmp is False:
                 vm_ids[j.data['vm_id']] = True
         time.sleep(1);
 
@@ -1383,9 +1417,13 @@ def createWorkerVMs(count, hvs, templ, datast, jd): # should be named createWork
     print('Creating worker VMs.')
     logger('Starting worker {} VMs with {} template on the {} datastore on hvs: {}'.format(count,templ,datast,str(hvs)))
     vms = runAll(jobs)
+    if False in vms:
+        print "!!!! Virtual machines failed to create or got invalid API response, please investigate."
+        raise OnappException(jd_tmp, 'createWorkerVMs', "Invalid API Response for CreateVMs")
     stallUntilOnline(vms)
-    print('Storing VMs created.')
+    print('Storing VMs created in testVMs.')
     testVMs = vms;
+    print str(testVMs)
     # checkJobOutput(jobs, vms);
     return vms
 
@@ -1418,7 +1456,6 @@ def gatherIOPSData(vms, period=0):
     jobs = [ Job('GetVMIOPS', vm) for vm in tvms ]
     retData = runParallel(jobs)
     jobData = { t[0] : t[1] for t in retData };
-
     f = open(DATA_FILE, "a")
     f.write(str(jobData));
     f.write('\n');
@@ -1624,18 +1661,48 @@ def gatherIOPSData(vms, period=0):
 #     checkJobOutput(destroyJobs, runJobs(destroyJobs));
 #     timeDict.append('Seconds to destroy {} worker VMs: {}'.format(int(numvm)*len(hvs),round(float(time.time())-float(tt),2)))
 
-def runBatchesTest(batchSize):
+def recoverBatchData():
+    if not os.path.isfile(BATCHES_OUTPUT_FILE):
+        return [];
+    if os.stat(BATCHES_OUTPUT_FILE).st_size < 8:
+        return [];
+    bFile = open(BATCHES_OUTPUT_FILE, 'r')
+    try:
+        bContents = [ eval(l) for l in bFile.readlines() ]
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except:
+        print 'Unable to recover previous batch data.'
+        return [];
+    print 'Recovered previous batch data, {} batches total recovered.'.format(len(bContents))
+    return bContents;
+
+def runBatchesTest(batchSize, restartParams=False):
     global testVMs
     print('Running in batch mode.');
     logger('Batch mode enabled.');
     hvs = Job('ListHVsInZone', hv_zone_id=HVZONE).run()
-    t = getTemplate();
-    ds = getDatastore(HVZONE);
+    if restartParams:
+        if restartParams['defData']['vm_params'] == 0:
+            t = restartParams['defData']['vm_params']['template_id']
+            ds = restartParams['defData']['vm_params']['datastore_id']
+        else:
+            t = 0
+            ds = 0
+    else:
+        t = getTemplate();
+        ds = getDatastore(HVZONE);
     defData = {'resizetarget':2, 'maxdisksize': 20, 'wlduration': 3};
     ##### Gather information
     ##### Generate a batch, process entire thing.
     ##### Gather data about each job
-    if defaults:
+    if restartParams:
+        defData = restartParams['defData'];
+        print "Continuing from previous configuration file."
+        duration = int(raw_input("How many minutes longer should this test be ran? (Default 30): ") or 30)
+        duration = datetime.timedelta(minutes=int(duration));
+        delay = int(raw_input('Seconds to delay between batches? (Default: 30): ') or 30);
+    elif defaults:
         logger('Using default values for everything.');
         delay = 10;
         duration = 3600;
@@ -1667,10 +1734,14 @@ def runBatchesTest(batchSize):
         logger('Custom data: {}'.format(str(defData)));
     DeployWorkloadFile()
     if use_existing_virtual_machines:
-        print "Skipping VM creation..."
-        vms = ListVMs()
+        if restartParams: print "Using VMs on cloud rather than config file."
+        else: print "Skipping VM creation..."
+        testVMs = vms = ListVMs()
         #testVMs = vms
         defData['vm_params'] = 0
+    elif restartParams:
+        print "Using VMs from config file."
+        testVMs = vms = restartParams['testVMs']
     else:
         ask = raw_input('Customize VM resources (y/n)? ')
         while ask not in ['n','N','y','Y']:
@@ -1683,7 +1754,7 @@ def runBatchesTest(batchSize):
             jd['cpu_shares'] = raw_input('CPU Shares: ')
             jd['primary_disk_size'] = raw_input('Primary disk size: ')
         else:
-            templ_data = dpsql("SELECT * FROM templates WHERE id={}".format(templ))
+            templ_data = dpsql("SELECT * FROM templates WHERE id={}".format(t))
             jd = { 'memory' : templ_data['min_memory_size'], \
                    'cpus'   : 1, \
                    'cpu_shares': 1, \
@@ -1694,13 +1765,21 @@ def runBatchesTest(batchSize):
         defData['vm_params']['template_id'] = t
         defData['vm_params']['datastore_id'] = ds
         vms = createWorkerVMs(nvms, hvs, t, ds, jd);
+    ################## make sure you turn on any VMs which are off right here.
     stallUntilOnline(vms)
     runParallel([Job('CopyWorkloadFile', vm) for vm in vms])
     if run_pre_burnin_test: BatchWorkload(vms, defData['ddparams'], run_pre_burnin_test)
     beginTime = datetime.datetime.now();
     batchNum = 0;
     allData = []
-    output_file = open('batches.output', 'a')
+    if restartParams:
+        allData = recoverBatchData();
+    output_file = open(BATCHES_OUTPUT_FILE, 'a')
+    if batchSize is 0:
+        batchSize = float(len(vms))*1.25
+    if not restartParams: writeConfigFile(CONFIG_FILE, defData)
+    elif 'latest' in restartParams.keys(): batchNum = restartParams['latest'][0]
+    else: batchNum = 0;
     while datetime.datetime.now() - beginTime < duration:
         batchNum+=1;
         if VERBOSE: print 'Ensuring VM\'s are online.'
@@ -1731,6 +1810,8 @@ def runBatchesTest(batchSize):
     # print allData
     # print('\n\nData also in ./batches.output.\n');
     #processIOPSOutput(gatherIOPSData(testVMs))
+    unlockJobs = False
+    destroyJobs = False
     if not use_existing_virtual_machines:
         print('Time completed. Cleaning up virtual machines.');
         unlockJobs = [ Job('UnlockVM', {'vm_id':vm['id']}) for vm in testVMs ]
@@ -1828,10 +1909,14 @@ def newProcessIOPSData(content):
                     'datawrite': cont['datawrite'][ii], \
                     'reads'    : cont['reads']    [ii], \
                     'writes'   : cont['writes']   [ii] }
-        per_vm_averages[vm]['dataread']  = per_vm_totals[vm]['dataread']  / numStats
-        per_vm_averages[vm]['datawrite'] = per_vm_totals[vm]['datawrite'] / numStats
-        per_vm_averages[vm]['reads']     = per_vm_totals[vm]['reads']     / numStats
-        per_vm_averages[vm]['writes']    = per_vm_totals[vm]['writes']    / numStats
+        if numStats == 0:
+            per_vm_averages[vm] = {'dataread':0, 'datawrite':0,'reads':0,'writes':0}
+        else:
+            per_vm_averages[vm]['dataread']  = per_vm_totals[vm]['dataread']  / numStats
+            per_vm_averages[vm]['datawrite'] = per_vm_totals[vm]['datawrite'] / numStats
+            per_vm_averages[vm]['reads']     = per_vm_totals[vm]['reads']     / numStats
+            per_vm_averages[vm]['writes']    = per_vm_totals[vm]['writes']    / numStats
+    if len(per_vm_averages) == 0: return False;
     all_averages = { 'full': {   'dataread'  : avg([ per_vm_averages[vm]['dataread']  for vm in content.keys() ]) , \
                                  'datawrite' : avg([ per_vm_averages[vm]['datawrite'] for vm in content.keys() ]) , \
                                  'reads'     : avg([ per_vm_averages[vm]['reads']     for vm in content.keys() ]) , \
@@ -1866,6 +1951,7 @@ def gatherConfigData(zone):
         rData['label'] = hv['label']
         health_data['zone_data']['hypervisors'][hv['id']] = rData
     bs_data = dpsql("SELECT id, label, ip_address FROM backup_servers WHERE id IN (SELECT id FROM backup_server_joins WHERE target_join_type='HypervisorGroup' AND target_join_id={})".format(zone), unlist=False)
+    if not bs_data: return health_data;
     for bs in bs_data:
         rData = {}
         hv_ver_bash_cmd = "ssh -p{} root@{} \"cat /onapp/onapp-store-install.version 2>/dev/null || cat /onapp/onapp-hv-tools.version 2>/dev/null || grep Version /onappstore/package-version.txt 2>/dev/null || echo '???'\""
@@ -1901,6 +1987,39 @@ def gatherConfigData(zone):
 #                     'reads':     content[vm][disk]['reads'][n],     \
 #                     'writes':    content[vm][disk]['writes'][n] }
 
+
+
+
+def writeConfigFile(f, defData):
+    global testVMs
+    print "!!!! WRITING CONFIG FILE !!!!"
+    print "defData:::::"
+    print str(defData)
+    print
+    print "testVMs:::::"
+    print str(testVMs)
+    with open(f, 'w') as file:
+        print 'Writing configuration file'
+        file.write(str(defData))
+        file.write('\n')
+        file.write(str(testVMs))
+
+def loadConfigFile(f):
+    with open(f, 'r') as file:
+        content = [ line for line in file.readlines() ]
+    if os.path.isfile(BATCHES_OUTPUT_FILE):
+        with open(BATCHES_OUTPUT_FILE, 'r') as batchesFile:
+            lastbatch = batchesFile.readlines()[-1]
+            batchData = eval(lastbatch)
+            config['latest'] = batchData
+    else:
+        config['latest'] = False;
+    config = {};
+    config['defData'] = eval(content[0])
+    config['testVMs'] = eval(content[1])
+    return config;
+
+
 class OnappException(Exception):
     def __init__(self, d, f, reason=False):
         self.data = d;
@@ -1910,37 +2029,75 @@ class OnappException(Exception):
         if self.reason is not False: print('Reason: {}'.format(reason))
 
 if __name__ == "__main__":
-    beginTime = datetime.datetime.now()
-    HVZONE = getHVZone();
-    if batchsize: unlockJobs, destroyJobs, returnData, testParameters = runBatchesTest(int(batchsize))
-    else: print "Right now, run it with the -b flag for batch testing, or import as library."
-    print "Gathering data and submitting it..."
-    rData = {}
-    rData['batches'] = newProcessOutput(returnData)
-    all_the_iops_data = gatherIOPSData(testVMs, {'start':beginTime, 'stop':datetime.datetime.now()})
-    processed_iops_data = newProcessIOPSData(all_the_iops_data)
-    rData['iops'] = processed_iops_data
-    rData['config'] = gatherConfigData(HVZONE)
-    rData['config']['vm_params'] = testParameters
+    if ONLY_GENERATE_OUTPUT:
+        file = ONLY_GENERATE_OUTPUT
+        if not os.path.isfile(file):
+            raise EnvironmentError("File does not exist: {}".format(file))
+        f_handle = open(file, 'r')
+        content = [ eval(f_handle.strip()) for line in f_handle.readlines() ]
+        f_handle.close()
+        processed_content = newProcessOutput(content)
+        print processed_content;
+        f_handle = open("{}.processed".format(file), 'w')
+        f_handle.write(processed_content)
+        f_handle.flush()
+        f_handle.close()
+        print "Processed content has been written to {}.processed".format(file)
+    else:
+        beginTime = datetime.datetime.now()
+        if os.path.isfile(CONFIG_FILE) and os.stat(CONFIG_FILE).st_size > 8:
+            if not quiet: print "Found configuration file from previous run, attempting restart."
+            restartParameters = loadConfigFile(CONFIG_FILE);
+            #beginTime = restartParameters['beginTime']
+            confhvs = []
+            for v in restartParameters['testVMs']:
+                if v['hypervisor_id'] not in confhvs: confhvs.append(v['hypervisor_id'])
+            zone = dsql("SELECT DISTINCT hypervisor_group_id FROM hypervisors WHERE id in ({})".format(','.join(str(t) for t in confhvs)))
+            if type(zone) is long:
+                HVZONE = zone;
+            else:
+                raise OnappException(zone, "Determine Hypervisor Zone", "There are multiple or no zones for these virtual machines.")
+        else:
+            restartParameters = False;
+            confhvs = []
+            if use_existing_virtual_machines:
+                for v in ListVMs():
+                    if v['hypervisor_id'] not in confhvs: confhvs.append(v['hypervisor_id'])
+                zone = dsql("SELECT DISTINCT hypervisor_group_id FROM hypervisors WHERE id in ({})".format(','.join(str(t) for t in confhvs)))
+                if type(zone) is long:
+                    HVZONE = zone;
+                else:
+                    raise OnappException(zone, "Determine Hypervisor Zone", "There are multiple or no zones for these virtual machines.")
+            else:
+                HVZONE = getHVZone();
+        unlockJobs, destroyJobs, returnData, testParameters = runBatchesTest(int(batchsize), restartParameters)
+        # else: print "Right now, run it with the -b flag for batch testing, or import as library."
+        print "Gathering data and submitting it..."
+        rData = {}
+        rData['batches'] = newProcessOutput(returnData)
+        all_the_iops_data = gatherIOPSData(testVMs, {'start':beginTime, 'end':datetime.datetime.now()})
+        processed_iops_data = newProcessIOPSData(all_the_iops_data)
+        rData['iops'] = processed_iops_data
+        rData['config'] = gatherConfigData(HVZONE)
+        rData['config'].update(testParameters)
 
-    print('Writing Python data to test_results.pydat')
-    pFile = open('test_results.pydat', 'w')
-    pFile.write(rData)
-    pFile.flush()
-    pFile.close()
+        print('Writing Python data to test_results.pydat')
+        pFile = open('test_results.pydat', 'w')
+        pFile.write(str(rData))
+        pFile.flush()
+        pFile.close()
 
-    print('Writing all JSON data to test_results.json')
-    jFile = open('test_results.json', 'w')
-    jFile.write(json.dumps(rData))
-    jFile.flush()
-    jFule.close()
+        print('Writing all JSON data to test_results.json')
+        jFile = open('test_results.json', 'w')
+        jFile.write(json.dumps(rData))
+        jFile.flush()
+        jFile.close()
 
-    if SEND_RESULTS:
-        submit_result = apiCall('/api/burnin', data=json.dumps(rData), target='architecture.onapp.com', auth=SOME_AUTH_KEY)
+        if SEND_RESULTS:
+            submit_result = apiCall('/api/burnin?token={}'.format(SEND_RESULTS), data=rData, target='https://architecture.onapp.com')
 
-    #returnData['iops'] = newProcessIOPSData(
-    if DELETE_VMS:
-        runParallel(unlockJobs)
-        time.sleep(4)
-        runParallel(destroyJobs)
-
+        #returnData['iops'] = newProcessIOPSData(
+        if DELETE_VMS:
+            runParallel(unlockJobs)
+            time.sleep(4)
+            runParallel(destroyJobs)
