@@ -1,5 +1,6 @@
 #!/usr/bin/python
 import os
+import re
 import ast
 import ssl
 import sys
@@ -144,6 +145,7 @@ arp.add_argument("-k", "--keep", help="Keep VMs; Do not delete VMs used for test
 arp.add_argument("-g", "--generate", metavar='F', help="Generate output from batch data, in the case of previous failure but you still want the data in proper format.", default=False)
 arp.add_argument("-t", "--token", metavar='T', help="Token for submitting to the architecture portal.", default=False)
 arp.add_argument("-u", "--user", metavar='U', help="User ID which has API key and permissions. Default is 1 (admin).", default=1)
+arp.add_argument("-i", "--iops", metavar='H', help="Just pull IOPS and process them from the past H hours.", default=False)
 args = arp.parse_args();
 VERBOSE=args.verbose;
 quiet=args.quiet;
@@ -158,7 +160,7 @@ if use_existing_virtual_machines: DELETE_VMS=False;
 run_pre_burnin_test=args.pretest;
 SEND_RESULTS = args.token
 USER_ID=args.user;
-
+just_iops_duration=args.iops;
 ONLY_GENERATE_OUTPUT=args.generate;
 
 FAILURE_LIMIT=25
@@ -372,7 +374,7 @@ def CreateIncrementalBackup(data):
         r = apiCall(url, data={"backup:":{"note":data['note']}}, method='POST')
     else:
         r = apiCall(url, method='POST')
-    return r[0];
+    return r;
 
 def CreateDiskBackup(data):
     checkKeys(data, ['disk_id'])
@@ -1092,7 +1094,7 @@ def BatchWorkload(vms, duration, params):
     rData = { vm['id'] : Job('GetVMWorkloadLog', vm).run() for vm in vms }
     return rData;
 
-def stallUntilOnline(vms, timeout=600, bTime=None):
+def stallUntilOnline(vms, timeout=3600, bTime=None):
     if type(vms) is dict:
         vm_ids = {vms['id']:False}
     elif type(vms) is int or type(vms) is long:
@@ -1125,6 +1127,12 @@ def stallUntilOnline(vms, timeout=600, bTime=None):
                 if status is False: continue;
                 vm_ids[j['id']] = True;
         time.sleep(1)
+    logger('VMs {} have come online.'.format(','.join([str(v) for v in vm_ids.keys()])))
+    if VERBOSE:
+        if type(vms) is int or type(vms) is long:
+            print "VM", vms, "has come online."
+        else:
+            print "VMs", ','.join([str(v) for v in vm_ids.keys()]), "have come online."
 
 def stallUntilOffline(vms, timeout=3600, bTime=None):
     if type(vms) is dict:
@@ -1154,6 +1162,12 @@ def stallUntilOffline(vms, timeout=3600, bTime=None):
                 vm_ids[j['id']] = True;
         time.sleep(1)
     time.sleep(1)
+    logger('VMs {} have gone offline.'.format(','.join([str(v) for v in vm_ids.keys()])))
+    if VERBOSE:
+        if type(vms) is int or type(vms) is long:
+            print "VM", vms, "has gone offline."
+        else:
+            print "VMs", ','.join([str(v) for v in vm_ids.keys()]), "have gone offline."
 
 def stallUntilDeleted(vms, timeout=3600, bTime=None):
     if type(vms) is dict:
@@ -1182,6 +1196,12 @@ def stallUntilDeleted(vms, timeout=3600, bTime=None):
             if tmp is False:
                 vm_ids[j.data['vm_id']] = True
         time.sleep(1);
+    logger('VMs {} have been deleted.'.format(','.join([str(v) for v in vm_ids.keys()])))
+    if VERBOSE:
+        if type(vms) is int or type(vms) is long:
+            print "VM", vms, "has been destroyed."
+        else:
+            print "VMs", ','.join([str(v) for v in vm_ids.keys()]), "have been destroyed."
 
 def stallUntilBackupBuilt(backup, timeout=3600):
     beginTime = datetime.datetime.now()
@@ -1195,6 +1215,9 @@ def stallUntilBackupBuilt(backup, timeout=3600):
         backupStatus = Job('DetailBackup', backup_id=backup['id']).run()
         time.sleep(2)
     time.sleep(1)
+    logger('Backup ID {} has been built.'.format(backup['id']))
+    if VERBOSE:
+        print 'Backup ID {} has been built.'.format(backup['id'])
 
 def getAllStorageNodeStats(start, end):
     nodes = aGetStorageNodes();
@@ -1213,6 +1236,8 @@ def batchRunnerJob(data):
     del params['func']
     vmdeets = Job('DetailVM', vm_id=data['vm_id']).run()
     vmdisks = Job('ListVMDisks', vm_id=data['vm_id']).run()
+    if VERBOSE:
+        print "Starting Job", data['func']
     try:
         output = globals()[data['func']](params)
     except HTTPError as err:
@@ -1233,8 +1258,9 @@ def batchRunnerJob(data):
         new_output = {'backup_id':data['backup_id']}
         return {'vm':vmdeets, 'time':datetime.datetime.now() - beginTime, 'output':new_output}
     if data['func'] == 'CreateIncrementalBackup':
-        stallUntilBackupBuilt(output)
+        stallUntilBackupBuilt(output['backup'])
         return {'vm':vmdeets, 'time':datetime.datetime.now() - beginTime}
+
 
 
 def generateJobsBatch(tvms, count, defData={}):
@@ -1405,17 +1431,16 @@ def createWorkerVMs(count, hvs, templ, datast, jd): # should be named createWork
         for hv in hvs:
             jd_tmp = {'hypervisor_id':hv['id'], 'template_id':templ, \
             'data_store_group_primary_id':datast, 'data_store_group_swap_id':datast, \
-            'hostname':'burninTesting{}on{}'.format(i,hv['label']), \
+            'hostname':'burninTesting{}on{}'.format(i,re.sub(r'[^a-zA-Z0-9]', '', hv['label'])), \
             'label':'burnin{}at{}'.format(i,hv['label']), \
             }
-            print jd_tmp
             tmp = jd_tmp.copy()
-            print tmp
             jd_tmp.update(jd);
+            if not quiet: print jd_tmp
             # jobs.append({'action':'createvm', 'data':jd_tmp})
             jobs.append(Job('CreateVM', jd_tmp))
     print('Creating worker VMs.')
-    logger('Starting worker {} VMs with {} template on the {} datastore on hvs: {}'.format(count,templ,datast,str(hvs)))
+    logger('Starting worker {} VMs with {} template on the {} datastore zone on hvs: {}'.format(count,templ,datast,str(hvs)))
     vms = runAll(jobs)
     if False in vms:
         print "!!!! Virtual machines failed to create or got invalid API response, please investigate."
@@ -1683,9 +1708,9 @@ def runBatchesTest(batchSize, restartParams=False):
     logger('Batch mode enabled.');
     hvs = Job('ListHVsInZone', hv_zone_id=HVZONE).run()
     if restartParams:
-        if restartParams['defData']['vm_params'] == 0:
+        if restartParams['defData']['vm_params'] != 0:
             t = restartParams['defData']['vm_params']['template_id']
-            ds = restartParams['defData']['vm_params']['datastore_id']
+            ds = restartParams['defData']['datastore_zone_id']
         else:
             t = 0
             ds = 0
@@ -1713,7 +1738,10 @@ def runBatchesTest(batchSize, restartParams=False):
         duration = raw_input('Duration of test in minutes? (Default 60): ') or 60;
         duration = datetime.timedelta(minutes=int(duration));
         if autoyes: noyes = 'y';
-        else: noyes = raw_input('Change default values for disk resizing and workload duration? (y/n): ');
+        else:
+            noyes = raw_input('Change default values for disk resizing and workload duration? (y/n): ');
+            while noyes not in ['n', 'N', 'y', 'Y']:
+                noyes = raw_input("Invalid. (y/n): ")
         if noyes in [ 'y' , 'Y' ]:
             defData['resizetarget'] = raw_input('How much to increase size for disks in GB(Default 2): ') or 2;
             defData['maxdisksize'] = raw_input('Maximum disk size in GB(default 20): ') or 20;
@@ -1722,6 +1750,8 @@ def runBatchesTest(batchSize, restartParams=False):
             noyes = 'n'
         else:
             noyes = raw_input('Customize dd parameters? (y/[n]): ') or 'n';
+            while noyes not in ['n', 'N', 'y', 'Y']:
+                noyes = raw_input('Invalid. (y/n): ')
         workParams = {'interval':10, 'writes':0, 'dd_bs':'10M', 'dd_count':10};
         if noyes in ['y', 'Y']:
             workParams = {};
@@ -1746,24 +1776,25 @@ def runBatchesTest(batchSize, restartParams=False):
         ask = raw_input('Customize VM resources (y/n)? ')
         while ask not in ['n','N','y','Y']:
             ask = raw_input('Invalid. (y/n)? ')
+        templ_data = dpsql("SELECT * FROM templates WHERE id={}".format(t))
         if ask in ['y', 'Y']:
             jd = {'required_virtual_machine_build': 1, \
                   'required_ip_address_assignment': 1 }
-            jd['memory'] = raw_input('Memory(MB): ')
-            jd['cpus'] = raw_input('CPU Cores: ')
-            jd['cpu_shares'] = raw_input('CPU Shares: ')
-            jd['primary_disk_size'] = raw_input('Primary disk size: ')
+            jd['memory'] = raw_input('Memory(MB): ') or templ_data['min_memory_size']
+            jd['cpus'] = raw_input('CPU Cores: ') or 1
+            jd['cpu_shares'] = raw_input('CPU Shares: ') or 1
+            jd['primary_disk_size'] = raw_input('Primary disk size: ') or templ_data['min_disk_size']
         else:
-            templ_data = dpsql("SELECT * FROM templates WHERE id={}".format(t))
+
             jd = { 'memory' : templ_data['min_memory_size'], \
                    'cpus'   : 1, \
                    'cpu_shares': 1, \
                    'primary_disk_size': templ_data['min_disk_size'], \
                    'required_virtual_machine_build': 1, \
-                   'required_ip_address_assignment': 1 }
+                   'required_ip_address_assignment': 'true' }
         defData['vm_params'] = jd
         defData['vm_params']['template_id'] = t
-        defData['vm_params']['datastore_id'] = ds
+        defData['datastore_zone_id'] = ds
         vms = createWorkerVMs(nvms, hvs, t, ds, jd);
     ################## make sure you turn on any VMs which are off right here.
     stallUntilOnline(vms)
@@ -1778,7 +1809,7 @@ def runBatchesTest(batchSize, restartParams=False):
     if batchSize is 0:
         batchSize = float(len(vms))*1.25
     if not restartParams: writeConfigFile(CONFIG_FILE, defData)
-    elif 'latest' in restartParams.keys(): batchNum = restartParams['latest'][0]
+    elif not not restartParams['latest']: batchNum = restartParams['latest'][0]
     else: batchNum = 0;
     while datetime.datetime.now() - beginTime < duration:
         batchNum+=1;
@@ -1789,11 +1820,10 @@ def runBatchesTest(batchSize, restartParams=False):
                 Job('StartVM', vm_id=vm['id']).run()
         stallUntilOnline(vms)
         jobs = generateJobsBatch(vms, batchSize, defData);
-        # print '------------------------------------------'
-        # for j in jobs:
-        #     print j
-        # print '------------------------------------------'
         print "Batch ID {}, # of Jobs: {}".format(batchNum, len(jobs))
+        if VERBOSE:
+            for j in jobs: print j
+            print '--------------------------------------------'
         jobData = runParallel(jobs);
         output_file.write(str((batchNum,datetime.datetime.now(),[tmpjobs.getAction() for tmpjobs in jobs],jobData)))
         output_file.write('\n')
@@ -2007,6 +2037,7 @@ def writeConfigFile(f, defData):
 def loadConfigFile(f):
     with open(f, 'r') as file:
         content = [ line for line in file.readlines() ]
+    config = {}
     if os.path.isfile(BATCHES_OUTPUT_FILE):
         with open(BATCHES_OUTPUT_FILE, 'r') as batchesFile:
             lastbatch = batchesFile.readlines()[-1]
@@ -2014,7 +2045,6 @@ def loadConfigFile(f):
             config['latest'] = batchData
     else:
         config['latest'] = False;
-    config = {};
     config['defData'] = eval(content[0])
     config['testVMs'] = eval(content[1])
     return config;
@@ -2043,6 +2073,8 @@ if __name__ == "__main__":
         f_handle.flush()
         f_handle.close()
         print "Processed content has been written to {}.processed".format(file)
+    if just_iops_duration:
+
     else:
         beginTime = datetime.datetime.now()
         if os.path.isfile(CONFIG_FILE) and os.stat(CONFIG_FILE).st_size > 8:
