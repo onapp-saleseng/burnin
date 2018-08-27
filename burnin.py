@@ -1272,11 +1272,17 @@ def generateJobsBatch(tvms, count, defData={}):
     # ('CreateVM',3), ('DestroyVM',2)];
     jobs = [];
     weight=0;
+    if VERBOSE: print 'Generating new batch.'
     while weight < count and len(vms) > 0:
         j = choice(jobsList);
-        while j[1] > int(count - weight): j = choice(jobsList);
+        print 'Job: {}'.format(j[0])
+        while j[1] > int(count - weight):
+            j = choice(jobsList);
+            if VERBOSE: print 'Reselecting: {}'.format(j[0])
         weight += j[1]
+        print 'Weight: {}'.format(weight)
         curvm = choice(vms)
+        if VERBOSE: print 'VM: {}'.format(curvm['id'])
         if j[0] == 'MigrateVM':
             lowest_hv_id = dsql("SELECT hv.id FROM hypervisors hv \
             JOIN virtual_machines vm ON vm.hypervisor_id = hv.id \
@@ -1807,7 +1813,7 @@ def runBatchesTest(batchSize, restartParams=False):
         allData = recoverBatchData();
     output_file = open(BATCHES_OUTPUT_FILE, 'a')
     if batchSize is 0:
-        batchSize = float(len(vms))*1.25
+        batchSize = int(float(len(vms))*1.25)
     if not restartParams: writeConfigFile(CONFIG_FILE, defData)
     elif not not restartParams['latest']: batchNum = restartParams['latest'][0]
     else: batchNum = 0;
