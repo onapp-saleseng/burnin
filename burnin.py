@@ -374,7 +374,7 @@ def CreateIncrementalBackup(data):
         r = apiCall(url, data={"backup:":{"note":data['note']}}, method='POST')
     else:
         r = apiCall(url, method='POST')
-    return r;
+    return r[0];
 
 def CreateDiskBackup(data):
     checkKeys(data, ['disk_id'])
@@ -2022,12 +2022,12 @@ def gatherConfigData(zone):
 
 def writeConfigFile(f, defData):
     global testVMs
-    print "!!!! WRITING CONFIG FILE !!!!"
-    print "defData:::::"
-    print str(defData)
-    print
-    print "testVMs:::::"
-    print str(testVMs)
+    # print "!!!! WRITING CONFIG FILE !!!!"
+    # print "defData:::::"
+    # print str(defData)
+    # print
+    # print "testVMs:::::"
+    # print str(testVMs)
     with open(f, 'w') as file:
         print 'Writing configuration file'
         file.write(str(defData))
@@ -2073,16 +2073,27 @@ if __name__ == "__main__":
         f_handle.flush()
         f_handle.close()
         print "Processed content has been written to {}.processed".format(file)
-    if just_iops_duration:
-
+    # if just_iops_duration:
+    #     print "Generation of IOPS not fully implemented."
+    # else:
+    beginTime = datetime.datetime.now()
+    if os.path.isfile(CONFIG_FILE) and os.stat(CONFIG_FILE).st_size > 8:
+        if not quiet: print "Found configuration file from previous run, attempting restart."
+        restartParameters = loadConfigFile(CONFIG_FILE);
+        #beginTime = restartParameters['beginTime']
+        confhvs = []
+        for v in restartParameters['testVMs']:
+            if v['hypervisor_id'] not in confhvs: confhvs.append(v['hypervisor_id'])
+        zone = dsql("SELECT DISTINCT hypervisor_group_id FROM hypervisors WHERE id in ({})".format(','.join(str(t) for t in confhvs)))
+        if type(zone) is long:
+            HVZONE = zone;
+        else:
+            raise OnappException(zone, "Determine Hypervisor Zone", "There are multiple or no zones for these virtual machines.")
     else:
-        beginTime = datetime.datetime.now()
-        if os.path.isfile(CONFIG_FILE) and os.stat(CONFIG_FILE).st_size > 8:
-            if not quiet: print "Found configuration file from previous run, attempting restart."
-            restartParameters = loadConfigFile(CONFIG_FILE);
-            #beginTime = restartParameters['beginTime']
-            confhvs = []
-            for v in restartParameters['testVMs']:
+        restartParameters = False;
+        confhvs = []
+        if use_existing_virtual_machines:
+            for v in ListVMs():
                 if v['hypervisor_id'] not in confhvs: confhvs.append(v['hypervisor_id'])
             zone = dsql("SELECT DISTINCT hypervisor_group_id FROM hypervisors WHERE id in ({})".format(','.join(str(t) for t in confhvs)))
             if type(zone) is long:
@@ -2090,46 +2101,35 @@ if __name__ == "__main__":
             else:
                 raise OnappException(zone, "Determine Hypervisor Zone", "There are multiple or no zones for these virtual machines.")
         else:
-            restartParameters = False;
-            confhvs = []
-            if use_existing_virtual_machines:
-                for v in ListVMs():
-                    if v['hypervisor_id'] not in confhvs: confhvs.append(v['hypervisor_id'])
-                zone = dsql("SELECT DISTINCT hypervisor_group_id FROM hypervisors WHERE id in ({})".format(','.join(str(t) for t in confhvs)))
-                if type(zone) is long:
-                    HVZONE = zone;
-                else:
-                    raise OnappException(zone, "Determine Hypervisor Zone", "There are multiple or no zones for these virtual machines.")
-            else:
-                HVZONE = getHVZone();
-        unlockJobs, destroyJobs, returnData, testParameters = runBatchesTest(int(batchsize), restartParameters)
-        # else: print "Right now, run it with the -b flag for batch testing, or import as library."
-        print "Gathering data and submitting it..."
-        rData = {}
-        rData['batches'] = newProcessOutput(returnData)
-        all_the_iops_data = gatherIOPSData(testVMs, {'start':beginTime, 'end':datetime.datetime.now()})
-        processed_iops_data = newProcessIOPSData(all_the_iops_data)
-        rData['iops'] = processed_iops_data
-        rData['config'] = gatherConfigData(HVZONE)
-        rData['config'].update(testParameters)
+            HVZONE = getHVZone();
+    unlockJobs, destroyJobs, returnData, testParameters = runBatchesTest(int(batchsize), restartParameters)
+    # else: print "Right now, run it with the -b flag for batch testing, or import as library."
+    print "Gathering data and submitting it..."
+    rData = {}
+    rData['batches'] = newProcessOutput(returnData)
+    all_the_iops_data = gatherIOPSData(testVMs, {'start':beginTime, 'end':datetime.datetime.now()})
+    processed_iops_data = newProcessIOPSData(all_the_iops_data)
+    rData['iops'] = processed_iops_data
+    rData['config'] = gatherConfigData(HVZONE)
+    rData['config'].update(testParameters)
 
-        print('Writing Python data to test_results.pydat')
-        pFile = open('test_results.pydat', 'w')
-        pFile.write(str(rData))
-        pFile.flush()
-        pFile.close()
+    print('Writing Python data to test_results.pydat')
+    pFile = open('test_results.pydat', 'w')
+    pFile.write(str(rData))
+    pFile.flush()
+    pFile.close()
 
-        print('Writing all JSON data to test_results.json')
-        jFile = open('test_results.json', 'w')
-        jFile.write(json.dumps(rData))
-        jFile.flush()
-        jFile.close()
+    print('Writing all JSON data to test_results.json')
+    jFile = open('test_results.json', 'w')
+    jFile.write(json.dumps(rData))
+    jFile.flush()
+    jFile.close()
 
-        if SEND_RESULTS:
-            submit_result = apiCall('/api/burnin?token={}'.format(SEND_RESULTS), data=rData, target='https://architecture.onapp.com')
+    if SEND_RESULTS:
+        submit_result = apiCall('/api/burnin?token={}'.format(SEND_RESULTS), data=rData, target='https://architecture.onapp.com')
 
-        #returnData['iops'] = newProcessIOPSData(
-        if DELETE_VMS:
-            runParallel(unlockJobs)
-            time.sleep(4)
-            runParallel(destroyJobs)
+    #returnData['iops'] = newProcessIOPSData(
+    if DELETE_VMS:
+        runParallel(unlockJobs)
+        time.sleep(4)
+        runParallel(destroyJobs)
