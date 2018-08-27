@@ -1258,7 +1258,7 @@ def batchRunnerJob(data):
         new_output = {'backup_id':data['backup_id']}
         return {'vm':vmdeets, 'time':datetime.datetime.now() - beginTime, 'output':new_output}
     if data['func'] == 'CreateIncrementalBackup':
-        stallUntilBackupBuilt(output['backup'])
+        stallUntilBackupBuilt(output)
         return {'vm':vmdeets, 'time':datetime.datetime.now() - beginTime}
 
 
