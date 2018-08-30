@@ -1284,7 +1284,7 @@ def generateJobsBatch(tvms, count, defData={}):
             j = choice(jobsList);
             if VERBOSE: print 'Reselecting: {}'.format(j[0])
         weight += j[1]
-        if VERBOSE: rint 'Weight: {}'.format(weight)
+        if VERBOSE: print 'Weight: {}'.format(weight)
         curvm = choice(vms)
         if VERBOSE: print 'VM: {}'.format(curvm['id'])
         if j[0] == 'MigrateVM':
