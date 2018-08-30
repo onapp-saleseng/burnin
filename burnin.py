@@ -274,8 +274,9 @@ def runAll(j):
 
 
 def runParallel(j, timed=False):
-    if len(j) > 1: logger('Starting parallel jobs: {}'.format([job.getAction() for job in j]))
-    if VERBOSE: print "Starting parallel jobs: {}".format([job.getAction() for job in j])
+    if [job.getAction() for job in j if job.getAction() is not 'VMStatus']:
+        if len(j) > 1: logger('Starting parallel jobs: {}'.format([job.getAction() for job in j]))
+        if VERBOSE: print "Starting parallel jobs: {}".format([job.getAction() for job in j])
     poolHandler = NoDaePool(workers)
     try:
         if timed: jobData = poolHandler.map(__runTimedJob__, j)
@@ -374,7 +375,8 @@ def CreateIncrementalBackup(data):
         r = apiCall(url, data={"backup:":{"note":data['note']}}, method='POST')
     else:
         r = apiCall(url, method='POST')
-    return r[0];
+    if len(r) == 1: return r;
+    else: return r[0];
 
 def CreateDiskBackup(data):
     checkKeys(data, ['disk_id'])
@@ -1126,7 +1128,7 @@ def stallUntilOnline(vms, timeout=3600, bTime=None):
                 status = runCmd(cmd)
                 if status is False: continue;
                 vm_ids[j['id']] = True;
-        time.sleep(1)
+        time.sleep(2)
     logger('VMs {} have come online.'.format(','.join([str(v) for v in vm_ids.keys()])))
     if VERBOSE:
         if type(vms) is int or type(vms) is long:
@@ -1451,6 +1453,8 @@ def createWorkerVMs(count, hvs, templ, datast, jd): # should be named createWork
     if False in vms:
         print "!!!! Virtual machines failed to create or got invalid API response, please investigate."
         raise OnappException(jd_tmp, 'createWorkerVMs', "Invalid API Response for CreateVMs")
+    print 'Sleeping for a few seconds before checking VM status...'
+    time.sleep(30)
     stallUntilOnline(vms)
     print('Storing VMs created in testVMs.')
     testVMs = vms;
