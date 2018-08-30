@@ -376,6 +376,7 @@ def CreateIncrementalBackup(data):
     else:
         r = apiCall(url, method='POST')
     if len(r) == 1: return r;
+    elif type(r) is dict and len(r.keys()) == 1: return r['backup']
     else: return r[0];
 
 def CreateDiskBackup(data):
@@ -1241,7 +1242,7 @@ def batchRunnerJob(data):
     if VERBOSE:
         print "Starting Job", data['func']
     try:
-        output = globals()[data['func']](params)
+        output = Job(data['func'], params).run();#output = globals()[data['func']](params)
     except HTTPError as err:
         print "HTTP ERROR", err
         raise
@@ -1260,6 +1261,7 @@ def batchRunnerJob(data):
         new_output = {'backup_id':data['backup_id']}
         return {'vm':vmdeets, 'time':datetime.datetime.now() - beginTime, 'output':new_output}
     if data['func'] == 'CreateIncrementalBackup':
+        print output
         stallUntilBackupBuilt(output)
         return {'vm':vmdeets, 'time':datetime.datetime.now() - beginTime}
 
@@ -1277,12 +1279,12 @@ def generateJobsBatch(tvms, count, defData={}):
     if VERBOSE: print 'Generating new batch.'
     while weight < count and len(vms) > 0:
         j = choice(jobsList);
-        print 'Job: {}'.format(j[0])
+        if VERBOSE: print 'Job: {}'.format(j[0])
         while j[1] > int(count - weight):
             j = choice(jobsList);
             if VERBOSE: print 'Reselecting: {}'.format(j[0])
         weight += j[1]
-        print 'Weight: {}'.format(weight)
+        if VERBOSE: rint 'Weight: {}'.format(weight)
         curvm = choice(vms)
         if VERBOSE: print 'VM: {}'.format(curvm['id'])
         if j[0] == 'MigrateVM':
