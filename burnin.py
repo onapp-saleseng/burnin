@@ -20,38 +20,29 @@ from random import shuffle, sample, choice
 from multiprocessing import Process, Pool, TimeoutError
 from urllib2 import Request, urlopen, URLError, build_opener, HTTPHandler, HTTPError
 
-try:
-    import MySQLdb as SQL
-except ImportError:
-    print "MySQL not detected, attempting to install automatically..."
-    runCmd(['yum','-q','-y','install','MySQL-python'])
-    try:
-        import MySQLdb as SQL
-        print "Imported MySQL properly."
-    except:
-        print "Couldn't install/import MySQL. Please run `yum -y install MySQL-python`."
-        raise
 
+# All of the config options are here.
 now = datetime.datetime.now();
-LOG_FILE = 'burnin.{}-{}-{}_{}-{}{}.log'.format(now.year, now.month, now.day, now.hour%12, now.minute,'pm' if now.hour/12 else 'am')
+LOG_FILE = 'burnin.{}-{}-{}_{}{}.log'.format(now.year, now.month, now.day, now.hour%12,'pm' if now.hour/12 else 'am')
 # DATA_FILE = 'workload.dat'
 API_TARGET = 'http://127.0.0.1'
-MAX_FAILURES = 50;
-HVZONE = 0;
-testFailures = 0;
 SSH_OPTIONS="-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30"
-
-DATA_FILE="IOPSTest.out"
-BATCHES_OUTPUT_FILE="batches.out"
+DATA_FILE="IOPSResults.data"
+BATCHES_OUTPUT_FILE="batches.data"
 CONFIG_FILE="burnin.pyconf"
 
+PYTHON_TEST_RESULTS_FILE='test_results.pydat'
+JSON_TEST_RESULTS_FILE  ='test_results.json'
 
+FAILURE_LIMIT=25
+FALURES=0
 
 ONAPP_ROOT = '/onapp'
 ONAPP_CONF_DIR="{}/interface/config".format(ONAPP_ROOT);
 ONAPP_CONF_FILE="{}/on_app.yml".format(ONAPP_CONF_DIR);
 DB_CONF_FILE="{}/database.yml".format(ONAPP_CONF_DIR);
 
+HVZONE = 0
 ## These classes were stolen from the internet,
 ## However they're for non-daemonizing the processes
 ## Because occaisionally one needs to spawn some children for a second.
@@ -87,6 +78,7 @@ def is_ip(s):
             return False
     return True
 
+# functions that I've made, and are used around.
 def avg(l,round_to=False):
     if type(l) is not list: raise TypeError('List required')
     try: sum(l)
@@ -98,12 +90,12 @@ def avg(l,round_to=False):
 
 def errorCheck(err, contFlag=True):
     global testVMs;
-    global testFailures;
+    global FAILURES;
     logger('Error: Action: {}, Data: {}.'.format(err.func, err.data))
     if err.func == 'dbcall': return True;
-    testFailures += 1;
+    FAILURES += 1;
     if batchsize and contFlag and err.func != 'createvm':
-        if testFailures < MAX_FAILURES:
+        if FAILURES < FAILURE_LIMIT:
             print('Action {} failed with data {}, attempting to continue.'.format(err.func, err.data));
             return True;
         else:
@@ -129,18 +121,52 @@ def errorCheck(err, contFlag=True):
             logger('Program terminated.');
             sys.exit();
 
+def logger(s):
+    l = open(LOG_FILE, "a");
+    text = '[{}] - {}\n'.format(str(datetime.datetime.now()),s)
+    l.write(text)
+    l.flush();
+    l.close();
+    # if VERBOSE: print text.rstrip();
+
+def runCmd(cmd, shell=False, shlexy=True):
+    if shlexy and type(cmd) is str:
+        cmd = shlex.split(cmd)
+    stdout, stderr = subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate();
+    if stderr and 'Warning: Permanently added' not in stderr:
+        logger("Command {} failed, stderr: {}".format(cmd, stderr.strip()))
+        return False;
+    return stdout.strip();
+
+
+# try to import MySQLdb, attempt to install if not or raise an error.
+try:
+    import MySQLdb as SQL
+except ImportError:
+    print "MySQL not detected, attempting to install automatically..."
+    runCmd(['yum','-q','-y','install','MySQL-python'])
+    try:
+        import MySQLdb as SQL
+        print "Imported MySQL properly."
+    except:
+        print "Couldn't install/import MySQL. Please run `sudo yum -y install MySQL-python`."
+        raise
+
+
+
+### There are too many arguments here.
 ####################################
 arp = argparse.ArgumentParser(prog='nuburn', description='Burn-in script for OnApp');
 garp= arp.add_mutually_exclusive_group();
 garp.add_argument("-v", "--verbose", help="Verbose output/logging", action="store_true");
 garp.add_argument("-q", "--quiet", help="Quiet output", action="store_true");
 arp.add_argument("-w", "--workers", metavar='N', help="Number of worker processes for starting jobs. Default: 8", default=8);
-arp.add_argument("-d", "--defaults", help="Automatically do all tests and use default values (1/2 of VMs normally) without prompting.", action="store_true");
-arp.add_argument("-c", "--contmode", help="Continue Mode; Workloads will be started again if they are detected as stopped.", action="store_true");
+arp.add_argument("-d", "--defaults", help="Automatically do all tests and use default values without prompting.", action="store_true");
+# arp.add_argument("-c", "--contmode", help="Continue Mode; Workloads will be started again if they are detected as stopped.", action="store_true");
 arp.add_argument("-y", "--yes", help="Answer yes to most questions(not custom dd params or error passing)", action="store_true");
-arp.add_argument("-b", "--batch", metavar='N', help="Enables Batches mode; picks multiple jobs to fill N weight for a batch. Workers can limit batch speed.  Default behavior is to run normal burnin test.", default=False)
+arp.add_argument("-b", "--batch", metavar='N', help="Alter batch weight, default is 1.25*(# VMs). This causes between 62-100\% of VMs being used per batch", default=False)
 arp.add_argument("-p", "--pretest", metavar='N', help="Number of minutes to run a burnin pretest, which will run disk workloads on all VMs", default=False);
-arp.add_argument("-z", "--zzzz", help="Continue working with EVERY virtual machine on the cloud right now. Dev use mainly. Implies -k", action="store_true", default=False)
+arp.add_argument("-z", "--zzzz", help="Continue working with -EVERY- virtual machine on the cloud right now. Dev use mainly. Implies -k", action="store_true", default=False)
 arp.add_argument("-k", "--keep", help="Keep VMs; Do not delete VMs used for testing at end of test. -z/--zzzz option implies this.", action="store_true", default=False)
 arp.add_argument("-g", "--generate", metavar='F', help="Generate output from batch data, in the case of previous failure but you still want the data in proper format.", default=False)
 arp.add_argument("-t", "--token", metavar='T', help="Token for submitting to the architecture portal.", default=False)
@@ -151,7 +177,7 @@ VERBOSE=args.verbose;
 quiet=args.quiet;
 workers=int(args.workers);
 defaults=args.defaults;
-CONTINUE_MODE=args.contmode;
+CONTINUE_MODE=True;  #Previously could change it but I think it's best forced on.
 batchsize=args.batch;
 autoyes=args.yes;
 use_existing_virtual_machines=args.zzzz;
@@ -163,17 +189,8 @@ USER_ID=args.user;
 just_iops_duration=args.iops;
 ONLY_GENERATE_OUTPUT=args.generate;
 
-FAILURE_LIMIT=25
-FALURES=0
-####################################
 
-def logger(s):
-    l = open(LOG_FILE, "a");
-    text = '[{}] - {}\n'.format(str(datetime.datetime.now()),s)
-    l.write(text)
-    l.flush();
-    l.close();
-    # if VERBOSE: print text.rstrip();
+####################################
 
 def pullDBConfig(f):
     confDict = {};
@@ -253,14 +270,7 @@ testVMs = [];
 # simultaneous_backups_per_backup_server
 # simultaneous_migrations_per_hypervisor
 
-def runCmd(cmd, shell=False, shlexy=True):
-    if shlexy and type(cmd) is str:
-        cmd = shlex.split(cmd)
-    stdout, stderr = subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate();
-    if stderr and 'Warning: Permanently added' not in stderr:
-        logger("Command {} failed, stderr: {}".format(cmd, stderr.strip()))
-        return False;
-    return stdout.strip();
+
 
 def __runJob__(j):
     return j.run();
@@ -806,7 +816,7 @@ def checkKeys(data, reqKeys):
 #     req = Request("{}{}".format(API_TARGET, r), data)
 def apiCall(r, data=None, method='GET', target=API_TARGET, auth=API_AUTH):
     req = Request("{}{}".format(target, r), json.dumps(data))
-    req.add_header("Authorization", "Basic {}".format(API_AUTH))
+    if auth: req.add_header("Authorization", "Basic {}".format(auth))
     req.add_header("Accept", "application/json")
     req.add_header("Content-type", "application/json")
     if method: req.get_method = lambda: method;
@@ -820,7 +830,8 @@ def apiCall(r, data=None, method='GET', target=API_TARGET, auth=API_AUTH):
     except HTTPError as err:
         caller = inspect.stack()[1][3];
         print caller,"called erroneous API request: {}{}, error: {}".format(target, r, err)
-        return False;
+        if r.endswith('status.json'): raise;
+        else: return False;
     status = response.getcode()
     if VERBOSE and 'status.json' not in r: logger('API Call executed - {}{}, Status code: {}'.format(API_TARGET, r, status));
     apiResponse = response.read().replace('null', 'None').replace('true', 'True').replace('false', 'False')
@@ -917,7 +928,7 @@ def DeployWorkloadFile(file_path='/tmp'):
     fi
 
     while true; do
-      VALUE=$(od -vAn -N1 -tu1 < /dev/urandom)
+      VALUE=$((RANDOM%101))
       if test $VALUE -ge $RATIO; then
 
         if [ $OS_TYPE = "linux" ]; then
@@ -988,21 +999,15 @@ def StartVMWorkload(data):
     return CheckVMWorkload(data['virtual_machine'])
 
 def CheckVMWorkload(data):
-    if type(data) is str:
-        if is_ip(data):
-            VM_IP=data
-        else:
-            raise ValueError('CheckVMWorkload was given string that is NOT an IP address.\nProvide either IP or VM Dictionary')
-    elif type(data) is dict:
-        VM_IP = data['ip_addresses'][0]['ip_address']['address']
-    else:
-        raise TypeError('CheckVMWorkload requires either IP addres string or VM Dictionary')
+    if type(data) is not dict:
+        raise TypeError('CheckVMWorkload requires dictionary of virtual machine')
+    VM_IP = data['ip_addresses'][0]['ip_address']['address']
     cmd = ['su','onapp','-c','ssh {} root@{} "pgrep -f /tmp/workload.sh"'.format(SSH_OPTIONS, VM_IP)]
     pid = runCmd(cmd)
     if pid:
         return True
     else:
-        return VM_IP;
+        return False;
 
 def StopVMWorkload(data):
     if type(data) is str:
@@ -1470,12 +1475,13 @@ def watchVMWorkload(data):
     proc = {}
     job = Job('CheckVMWorkload', data['virtual_machine'])
     while datetime.datetime.now() - beginTime < data['duration']:
-        if not job.run():
+        if job.run() is not True:
             elapsed = datetime.datetime.now() - beginTime
             if CONTINUE_MODE:
                 print "VM {} no longer running after {} seconds, attempting to restart workload.".format(data['virtual_machine']['id'], elapsed.seconds)
                 jobOutput = Job('StartVMWorkload', data).run()
                 if not jobOutput:
+                    print "Failed to restart workload on VM {}".format(data['virtual_machine']['id'])
                     return False;
             else:
                 print "VM {} no longer running after {} seconds, stopping monitoring.".format(data['virtual_machine']['id'], elapsed.seconds)
@@ -2085,10 +2091,34 @@ if __name__ == "__main__":
         f_handle.flush()
         f_handle.close()
         print "Processed content has been written to {}.processed".format(file)
-    # if just_iops_duration:
-    #     print "Generation of IOPS not fully implemented."
-    # else:
     beginTime = datetime.datetime.now()
+    if just_iops_duration is not False:
+        if not os.path.isfile(CONFIG_FILE) or os.stat(CONFIG_FILE).st_size < 8:
+            print 'Config file is not found or empty'
+            sys.exit()
+        else:
+            iops_vms = loadConfigFile(CONFIG_FILE)['testVMs']
+            if not iops_vms:  print 'No VMs found or config file was empty.'
+            try:
+                status_jobs = [ Job('VMStatus', vm_id=vms['id']) for vms in iops_vms ]
+                status_jobs_results = runParallel(status_jobs)
+            except HTTPError:
+                print 'Virtual machine in config file may not exist or had an error checking on via API'
+                sys.exit()
+            now = datetime.datetime.now();
+            iops = gatherIOPSData(iops_vms, {'start': now - datetime.timedelta(hours=1), 'end':now})
+            processed = newProcessIOPSData(iops)
+            if VERBOSE:
+                print " -------- Python Data ---------- "
+                print str(iops)
+                print " -------- Processed Data ----------- "
+                print json.dumps(processed, indent=1)
+            print 'Writing IOPS Data to file IOPS.json and IOPS.pydat'
+            with open('IOPS.json', 'w') as iops_file:
+                iops_file.write(json.dumps(processed))
+            with open('IOPS.pydat', 'w') as pydat_file:
+                pydat_file.write(str(iops))
+        sys.exit();
     if os.path.isfile(CONFIG_FILE) and os.stat(CONFIG_FILE).st_size > 8:
         if not quiet: print "Found configuration file from previous run, attempting restart."
         restartParameters = loadConfigFile(CONFIG_FILE);
@@ -2125,20 +2155,16 @@ if __name__ == "__main__":
     rData['config'] = gatherConfigData(HVZONE)
     rData['config'].update(testParameters)
 
-    print('Writing Python data to test_results.pydat')
-    pFile = open('test_results.pydat', 'w')
-    pFile.write(str(rData))
-    pFile.flush()
-    pFile.close()
+    print('Writing Python data to {}'.format(PYTHON_TEST_RESULTS_FILE))
+    with open(PYTHON_TEST_RESULTS_FILE, 'w') as pFile:
+        pFile.write(str(rData))
 
-    print('Writing all JSON data to test_results.json')
-    jFile = open('test_results.json', 'w')
-    jFile.write(json.dumps(rData))
-    jFile.flush()
-    jFile.close()
+    print('Writing all JSON data to {}'.format(JSON_TEST_RESULTS_FILE))
+    with open('test_results.json', 'w') as jFile:
+        jFile.write(json.dumps(rData))
 
     if SEND_RESULTS:
-        submit_result = apiCall('/api/burnin?token={}'.format(SEND_RESULTS), data=rData, target='https://architecture.onapp.com')
+        submit_result = apiCall('/api/burnin?token={}'.format(SEND_RESULTS), data=rData, target='https://architecture.onapp.com', method='POST')
 
     #returnData['iops'] = newProcessIOPSData(
     if DELETE_VMS:
