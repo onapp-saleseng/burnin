@@ -1985,14 +1985,14 @@ def gatherConfigData(zone):
     hv_data = dpsql("SELECT id, label, ip_address, hypervisor_type FROM hypervisors WHERE hypervisor_group_id={}".format(zone), unlist=False)
     for hv in hv_data:
         rData = {}
-        hv_ver_bash_cmd = "ssh -p{} root@{} \"cat /onapp/onapp-store-install.version 2>/dev/null || cat /onapp/onapp-hv-tools.version 2>/dev/null || grep Version /onappstore/package-version.txt 2>/dev/null || echo '???'\""
-        hv_ver_cmd = [ 'su', 'onapp', '-c', hv_ver_bash_cmd.format(ONAPP_CONFIG['ssh_port'], hv['ip_address']) ]
+        hv_ver_bash_cmd = "ssh -p{} {} root@{} \"cat /onapp/onapp-store-install.version 2>/dev/null || cat /onapp/onapp-hv-tools.version 2>/dev/null || grep Version /onappstore/package-version.txt 2>/dev/null || echo '???'\""
+        hv_ver_cmd = [ 'su', 'onapp', '-c', hv_ver_bash_cmd.format(ONAPP_CONFIG['ssh_port'], SSH_OPTIONS, hv['ip_address']) ]
         hv_kernel_cmd = [ 'su', 'onapp', '-c', 'ssh {} -p{} root@{} "uname -r 2>/dev/null" 2>/dev/null'.format(SSH_OPTIONS, ONAPP_CONFIG['ssh_port'], hv['ip_address']) ]
         hv_distro_cmd = [ 'su', 'onapp', '-c', 'ssh {} -p{} root@{} "cat /etc/redhat-release 2>/dev/null" 2>/dev/null'.format(SSH_OPTIONS, ONAPP_CONFIG['ssh_port'], hv['ip_address']) ]
         rData['version'] = runCmd(hv_ver_cmd);
         rData['kernel'] = runCmd(hv_kernel_cmd);
         rData['distro'] = runCmd(hv_distro_cmd);
-        rData['memory'] = runCmd(['su','onapp','-c','ssh -p{} root@{} "free -m"'.format(ONAPP_CONFIG['ssh_port'], hv['ip_address'])]).split('\n')[1].split()[1]
+        rData['memory'] = runCmd(['su','onapp','-c','ssh {} -p{} root@{} "free -m"'.format(SSH_OPTIONS, ONAPP_CONFIG['ssh_port'], hv['ip_address'])]).split('\n')[1].split()[1]
         rData['ip_address'] = hv['ip_address']
         rData['type'] = hv['hypervisor_type']
         rData['cpu'] = cpuCheck(hv['ip_address'])
@@ -2106,7 +2106,7 @@ if __name__ == "__main__":
                 print 'Virtual machine in config file may not exist or had an error checking on via API'
                 sys.exit()
             now = datetime.datetime.now();
-            iops = gatherIOPSData(iops_vms, {'start': now - datetime.timedelta(hours=1), 'end':now})
+            iops = gatherIOPSData(iops_vms, {'start': now - datetime.timedelta(hours=int(just_iops_duration)), 'end':now})
             processed = newProcessIOPSData(iops)
             if VERBOSE:
                 print " -------- Python Data ---------- "
@@ -2144,6 +2144,14 @@ if __name__ == "__main__":
                 raise OnappException(zone, "Determine Hypervisor Zone", "There are multiple or no zones for these virtual machines.")
         else:
             HVZONE = getHVZone();
+    if DELETE_VMS and not use_existing_virtual_machines and not restartParameters:
+        actually_delete = raw_input("Are you sure you wish to delete the virtual machines after the test is complete? (Y/N)")
+        while actually_delete not in ['Y', 'N']:
+            actually_delete = raw_input('Invalid. (Y/N)?')
+        if actually_delete == 'Y':
+            DELETE_VMS = True;
+        elif actually_delete == 'N':
+            DELETE_VMS = False;
     unlockJobs, destroyJobs, returnData, testParameters = runBatchesTest(int(batchsize), restartParameters)
     # else: print "Right now, run it with the -b flag for batch testing, or import as library."
     print "Gathering data and submitting it..."
