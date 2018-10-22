@@ -12,7 +12,7 @@ import inspect
 import argparse
 import datetime
 import subprocess
-import MySQLdb as SQL
+#import MySQLdb as SQL
 import multiprocessing.pool
 from subprocess import Popen
 from urllib import urlencode
@@ -138,6 +138,16 @@ def runCmd(cmd, shell=False, shlexy=True):
         return False;
     return stdout.strip();
 
+def generateHourlyStats():
+    cmd = ['su', 'onapp', '-c', 'cd /onapp/interface && RAILS_ENV=production rake vm:generate_hourly_stats']
+    stdout, stderr = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate();
+    stderr = [ x for x in stderr.rstrip('\n').split('\n') if 'WARNING: OnApp configuration key' not in x ]
+    if stderr:
+        logger("Generating hourly stats failed, stderr: {}".format('\n'.join(stderr).strip()))
+        return False
+    return True;
+
+
 
 # try to import MySQLdb, attempt to install if not or raise an error.
 try:
@@ -172,6 +182,7 @@ arp.add_argument("-g", "--generate", metavar='F', help="Generate output from bat
 arp.add_argument("-t", "--token", metavar='T', help="Token for submitting to the architecture portal.", default=False)
 arp.add_argument("-u", "--user", metavar='U', help="User ID which has API key and permissions. Default is 1 (admin).", default=1)
 arp.add_argument("-i", "--iops", metavar='H', help="Just pull IOPS and process them from the past H hours.", default=False)
+arp.add_argument("-m", "--minutes", metavar='M', help="Number of minutes to run the test for.", default=720)
 args = arp.parse_args();
 VERBOSE=args.verbose;
 quiet=args.quiet;
@@ -188,6 +199,7 @@ SEND_RESULTS = args.token
 USER_ID=args.user;
 just_iops_duration=args.iops;
 ONLY_GENERATE_OUTPUT=args.generate;
+DURATION_MINUTES=args.minutes
 
 
 ####################################
@@ -1071,7 +1083,7 @@ def SingleWorkload(data):
     else: raise OnappException('SingleWorkload', 'Uknown workload failure, log was not present.')
 
 def BatchWorkload(vms, duration, params):
-    print "Starting workload for VMs: {}".format([vm['ip'] for vm in vms])
+    print "Starting workload for VMs: {}".format([vm['id'] for vm in vms])
     jobs = [ Job('StartVMWorkload', virtual_machine=vm, **params) for vm in vms ]
     wl_status = runParallel(jobs)
     if False in wl_status:
@@ -1079,13 +1091,18 @@ def BatchWorkload(vms, duration, params):
         wl_status = runParallel(jobs)
         if False in wl_status:
             print "One or more workloads did not start. Stopping all and ending."
-            runParallel([Job('StopVMWorkload', virtual_machine=vm) for vm in vms])
+            runParallel([Job('StopVMWorkload', vm) for vm in vms])
+            return False
         else:
             print "All started the second time."
     else:
         print "All started the first time."
     print "Waiting for workload duration."
-    time.sleep(duration)
+    wData = params.copy()
+    wData['duration'] = duration
+    jobs = [ Job('watchVMWorkload', virtual_machine=vm, duration=duration, **params) for vm in vms ]
+    print "Watching workloads"
+    wl_watchers = runParallel(jobs)
     print "Duration complete! Stopping workloads."
     jobs = [ Job('StopVMWorkload', vm) for vm in vms ]
     wl_statss = runParallel(jobs)
@@ -1269,8 +1286,6 @@ def batchRunnerJob(data):
         print output
         stallUntilBackupBuilt(output)
         return {'vm':vmdeets, 'time':datetime.datetime.now() - beginTime}
-
-
 
 def generateJobsBatch(tvms, count, defData={}):
     vms = tvms[:]
@@ -1474,7 +1489,7 @@ def watchVMWorkload(data):
     beginTime = datetime.datetime.now()
     proc = {}
     job = Job('CheckVMWorkload', data['virtual_machine'])
-    while datetime.datetime.now() - beginTime < data['duration']:
+    while datetime.datetime.now() - beginTime < datetime.timedelta(seconds=data['duration']):
         if job.run() is not True:
             elapsed = datetime.datetime.now() - beginTime
             if CONTINUE_MODE:
@@ -1496,9 +1511,16 @@ def gatherIOPSData(vms, period=0):
     if period != 0:
         for n, vm in enumerate(tvms):
             tvms[n]['period']=period;
+    logger("Generating hourly stats before pulling IOPS data.")
+    if generateHourlyStats():
+        logger("Stats are generated.")
+    else:
+        print "!!!!! Hourly Stats failed to generate. The last section may be blank. !!!!!"
     jobs = [ Job('GetVMIOPS', vm) for vm in tvms ]
+    logger("Starting to pull VM IOPS")
     retData = runParallel(jobs)
     jobData = { t[0] : t[1] for t in retData };
+    logger("Writing IOPS data to file {}".format(DATA_FILE))
     f = open(DATA_FILE, "a")
     f.write(str(jobData));
     f.write('\n');
@@ -1739,22 +1761,23 @@ def runBatchesTest(batchSize, restartParams=False):
     ##### Gather information
     ##### Generate a batch, process entire thing.
     ##### Gather data about each job
+    duration=datetime.timedelta(minutes=int(DURATION_MINUTES))
     if restartParams:
         defData = restartParams['defData'];
         print "Continuing from previous configuration file."
-        duration = int(raw_input("How many minutes longer should this test be ran? (Default 30): ") or 30)
-        duration = datetime.timedelta(minutes=int(duration));
+        # duration = int(raw_input("How many minutes longer should this test be ran? (Default 30): ") or 30)
+        # duration = datetime.timedelta(minutes=int(duration));
         delay = int(raw_input('Seconds to delay between batches? (Default: 30): ') or 30);
     elif defaults:
         logger('Using default values for everything.');
         delay = 10;
-        duration = 3600;
+        duration = 360;
         nvms = 10;
     else:
         if not use_existing_virtual_machines: nvms = raw_input('How many virtual machines per hypervisor? (Default 10): ') or 10;
         delay = raw_input('Seconds to delay between batches? (Default 30): ') or 30;
-        duration = raw_input('Duration of test in minutes? (Default 60): ') or 60;
-        duration = datetime.timedelta(minutes=int(duration));
+        # duration = raw_input('Duration of test in minutes? (Default 60): ') or 60;
+        # duration = datetime.timedelta(minutes=int(duration));
         if autoyes: noyes = 'y';
         else:
             noyes = raw_input('Change default values for disk resizing and workload duration? (y/n): ');
@@ -1884,6 +1907,63 @@ def cpuCheck(target=False):
     rData['cores'] = runCmd(['su', 'onapp', '-c', 'ssh {} -p{} root@{} "{}"'.format(SSH_OPTIONS, ONAPP_CONFIG['ssh_port'], target, cpu_cores_cmd)])
     return rData;
 
+def motherboardCheck(target=False):
+    base_cmd = "dmidecode -s baseboard-{}"
+    if target is False:
+        return { \
+        'manufacturer' : runCmd(base_cmd.format('manufacturer')) ,
+        'product-name' : runCmd(base_cmd.format('product-name')) ,
+        'version' : runCmd(base_cmd.format('version')) }
+    rData = {};
+    rData['manufacturer'] = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, base_cmd.format('manufacturer'))])
+    rData['product-name'] = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, base_cmd.format('product-name'))])
+    rData['version'] = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, base_cmd.format('version'))])
+    return rData;
+
+def chassisCheck(target=False):
+    base_cmd = "dmidecode -s chassis-{}"
+    if target is False:
+        return { \
+        'manufacturer' : runCmd(base_cmd.format('manufacturer')) ,
+        'type' : runCmd(base_cmd.format('type')) ,
+        'version' : runCmd(base_cmd.format('version')) }
+    rData = {}
+    rData['manufacturer'] = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, base_cmd.format('manufacturer'))])
+    rData['type'] = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, base_cmd.format('type'))])
+    rData['version'] = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, base_cmd.format('version'))])
+    return rData;
+
+def diskHWCheck(target=False):
+    #list_disks_cmd = "lsblk -n -d -e 1,7,11 -oNAME"
+    list_disks_cmd = "lsblk -dn -oNAME -I8,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135"
+    udev_cmd = "bash -c 'eval $(udevadm info --export --query=property --path=/sys/class/block/{}) && echo $ID_VENDOR - $ID_MODEL'"
+    disk_data = {}
+    if target is False:
+        disks = runCmd(list_disks_cmd, shlexy=False, shell=True).split('\n')
+        for d in disks:
+            disk_data[d] = runCmd(udev_cmd.format(d), shlexy=False, shell=True)
+        return disk_data;
+    disks = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, list_disks_cmd)]).split('\n')
+    udev_cmd = "bash -c 'eval \$(udevadm info --export --query=property --path=/sys/class/block/{}) && echo \$ID_VENDOR - \$ID_MODEL'"
+    for d in disks:
+        disk_data[d] = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, udev_cmd.format(d))])
+    return disk_data;
+
+def interfaceCheck(target=False):
+    iface_cmd = "find /sys/class/net -type l -not -lname '*virtual*' -printf '/sys/class/net/%f\n'"
+    udev_cmd = "bash -c 'eval $(udevadm info --export --query=property --path=`readlink -f {}`) && echo $ID_MODEL_FROM_DATABASE'"
+    iface_data = {}
+    if target is False:
+        iface_list = runCmd(iface_cmd).split('\n')
+        for iface in iface_list:
+            iface_data[iface.split('/')[-1]] = runCmd(udev_cmd.format(iface))
+        return iface_data;
+    iface_list = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, iface_cmd)]).split('\n')
+    udev_cmd = "bash -c 'eval \$(udevadm info --export --query=property --path=`readlink -f {}`) && echo \$ID_MODEL_FROM_DATABASE'"
+    for iface in iface_list:
+        iface_data[iface.split('/')[-1]] = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, udev_cmd.format(iface))])
+    return iface_data;
+
 # gotta change this so the
     # jobsList = [('MigrateVM',1), ('EditDisk',2), ('CreateBackup',1), \
     # ('RestoreBackup',2), ('SingleWorkload',2), ('stopStartVM',1)]
@@ -1974,16 +2054,23 @@ def newProcessIOPSData(content):
 
 def gatherConfigData(zone):
     health_data = {}
+    if not quiet: print "Gathering cloud configuration data."
+    if not quiet: print "Gathering control server data."
     health_data['cp_data'] = { \
         'version' : runCmd("rpm -qa onapp-cp") , \
         'kernel': runCmd("uname -r") , \
         'distro' : runCmd("cat /etc/redhat-release") , \
         'timezone' : runCmd("readlink /etc/localtime").lstrip('../usr/share/zoneinfo/') , \
         'ip_address' : runCmd("ip route get 1 | awk '{print $NF;exit}'", shell=True, shlexy=False) , \
+        'motherboard' : motherboardCheck(), \
+        'chassis' : chassisCheck(), \
+        'disks' : diskHWCheck(), \
+        'network_interfaces' : interfaceCheck(), \
         'cpu' : cpuCheck()}
     health_data['zone_data'] = { 'hypervisors': {}, 'backup_servers': {} }
     hv_data = dpsql("SELECT id, label, ip_address, hypervisor_type FROM hypervisors WHERE hypervisor_group_id={}".format(zone), unlist=False)
     for hv in hv_data:
+        if not quiet: print "Gathering data for hypervisor {} @ {}".format(hv['label'], hv['ip_address'])
         rData = {}
         hv_ver_bash_cmd = "ssh -p{} {} root@{} \"cat /onapp/onapp-store-install.version 2>/dev/null || cat /onapp/onapp-hv-tools.version 2>/dev/null || grep Version /onappstore/package-version.txt 2>/dev/null || echo '???'\""
         hv_ver_cmd = [ 'su', 'onapp', '-c', hv_ver_bash_cmd.format(ONAPP_CONFIG['ssh_port'], SSH_OPTIONS, hv['ip_address']) ]
@@ -1996,11 +2083,16 @@ def gatherConfigData(zone):
         rData['ip_address'] = hv['ip_address']
         rData['type'] = hv['hypervisor_type']
         rData['cpu'] = cpuCheck(hv['ip_address'])
+        rData['motherboard'] = motherboardCheck(hv['ip_address'])
+        rData['chassis'] = chassisCheck(hv['ip_address'])
+        rData['disks'] = diskHWCheck(hv['ip_address'])
+        rData['network_interfaces'] = interfaceCheck(hv['ip_address'])
         rData['label'] = hv['label']
         health_data['zone_data']['hypervisors'][hv['id']] = rData
     bs_data = dpsql("SELECT id, label, ip_address FROM backup_servers WHERE id IN (SELECT id FROM backup_server_joins WHERE target_join_type='HypervisorGroup' AND target_join_id={})".format(zone), unlist=False)
     if not bs_data: return health_data;
     for bs in bs_data:
+        if not quiet: print "Gathering data for backup server {} @ {}".format(bs['label'], bs['ip_address'])
         rData = {}
         hv_ver_bash_cmd = "ssh -p{} root@{} \"cat /onapp/onapp-store-install.version 2>/dev/null || cat /onapp/onapp-hv-tools.version 2>/dev/null || grep Version /onappstore/package-version.txt 2>/dev/null || echo '???'\""
         hv_ver_cmd = [ 'su', 'onapp', '-c', hv_ver_bash_cmd.format(ONAPP_CONFIG['ssh_port'], hv['ip_address']) ]
@@ -2012,6 +2104,10 @@ def gatherConfigData(zone):
         rData['memory'] = runCmd(['su','onapp','-c','ssh {} -p{} root@{} "free -m"'.format(SSH_OPTIONS, ONAPP_CONFIG['ssh_port'], bs['ip_address'])]).split('\n')[1].split()[1]
         rData['ip_address'] = bs['ip_address']
         rData['cpu'] = cpuCheck(bs['ip_address'])
+        rData['motherboard'] = motherboardCheck(hv['ip_address'])
+        rData['chassis'] = chassisCheck(hv['ip_address'])
+        rData['disks'] = diskHWCheck(hv['ip_address'])
+        rData['network_interfaces'] = interfaceCheck(hv['ip_address'])
         rData['label'] = bs['label']
         health_data['zone_data']['backup_servers'][bs['id']] = rData
     return health_data;
@@ -2157,6 +2253,8 @@ if __name__ == "__main__":
     print "Gathering data and submitting it..."
     rData = {}
     rData['batches'] = newProcessOutput(returnData)
+    if VERBOSE: print "Generating hourly stats for IOPS data."
+    hourly_status_result = runCmd(['su', 'onapp', '-c', 'cd /onapp/interface; RAILS_ENV=production rake vm:generate_hourly_stats'])
     all_the_iops_data = gatherIOPSData(testVMs, {'start':beginTime, 'end':datetime.datetime.now()})
     processed_iops_data = newProcessIOPSData(all_the_iops_data)
     rData['iops'] = processed_iops_data
