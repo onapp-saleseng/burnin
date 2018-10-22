@@ -1771,7 +1771,7 @@ def runBatchesTest(batchSize, restartParams=False):
     elif defaults:
         logger('Using default values for everything.');
         delay = 10;
-        duration = 360;
+        # duration = datetime.timedelta(minutes=720);
         nvms = 10;
     else:
         if not use_existing_virtual_machines: nvms = raw_input('How many virtual machines per hypervisor? (Default 10): ') or 10;
