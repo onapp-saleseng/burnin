@@ -27,12 +27,12 @@ LOG_FILE = 'burnin.{}-{}-{}_{}{}.log'.format(now.year, now.month, now.day, now.h
 # DATA_FILE = 'workload.dat'
 API_TARGET = 'http://127.0.0.1'
 SSH_OPTIONS="-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30"
-DATA_FILE="IOPSResults.data"
+DATA_FILE="burninIOPSResults.data"
 BATCHES_OUTPUT_FILE="batches.data"
 CONFIG_FILE="burnin.pyconf"
 
-PYTHON_TEST_RESULTS_FILE='test_results.pydat'
-JSON_TEST_RESULTS_FILE  ='test_results.json'
+PYTHON_TEST_RESULTS_FILE='burnin_test_results.pydat'
+JSON_TEST_RESULTS_FILE  ='burnin_test_results.json'
 
 FAILURE_LIMIT=25
 FALURES=0
@@ -42,11 +42,20 @@ ONAPP_CONF_DIR="{}/interface/config".format(ONAPP_ROOT);
 ONAPP_CONF_FILE="{}/on_app.yml".format(ONAPP_CONF_DIR);
 DB_CONF_FILE="{}/database.yml".format(ONAPP_CONF_DIR);
 
+DEFAULTS = { \
+    'interval' : 10, \
+    'writes' : 0, \
+    'dd_bs' : '10M', \
+    'dd_count' : 10
+    }
+
+
+
 HVZONE = 0
 ## These classes were stolen from the internet,
 ## However they're for non-daemonizing the processes
 ## Because occaisionally one needs to spawn some children for a second.
-##### I actually may have fixed this, so it may not be necessary anymore? I'll change it someday.
+##### I actually may have fixed this, so it may not be necessary anymore but I'm afraid to change it.
 class NoDaemonProcess(Process):
     # make 'daemon' attribute always return False
     def _get_daemon(self):
@@ -138,17 +147,6 @@ def runCmd(cmd, shell=False, shlexy=True):
         return False;
     return stdout.strip();
 
-def generateHourlyStats():
-    cmd = ['su', 'onapp', '-c', 'cd /onapp/interface && RAILS_ENV=production rake vm:generate_hourly_stats']
-    stdout, stderr = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate();
-    stderr = [ x for x in stderr.rstrip('\n').split('\n') if 'WARNING: OnApp configuration key' not in x ]
-    if stderr:
-        logger("Generating hourly stats failed, stderr: {}".format('\n'.join(stderr).strip()))
-        return False
-    return True;
-
-
-
 # try to import MySQLdb, attempt to install if not or raise an error.
 try:
     import MySQLdb as SQL
@@ -174,7 +172,7 @@ arp.add_argument("-w", "--workers", metavar='N', help="Number of worker processe
 arp.add_argument("-d", "--defaults", help="Automatically do all tests and use default values without prompting.", action="store_true");
 # arp.add_argument("-c", "--contmode", help="Continue Mode; Workloads will be started again if they are detected as stopped.", action="store_true");
 arp.add_argument("-y", "--yes", help="Answer yes to most questions(not custom dd params or error passing)", action="store_true");
-arp.add_argument("-b", "--batch", metavar='N', help="Alter batch weight, default is 1.25*(# VMs). This causes between 62-100\% of VMs being used per batch", default=False)
+arp.add_argument("-b", "--batch", metavar='N', help="Alter batch weight, default is 1.25*(# VMs). This causes between 62-100\%  of VMs being used per batch", default=False)
 arp.add_argument("-p", "--pretest", metavar='N', help="Number of minutes to run a burnin pretest, which will run disk workloads on all VMs", default=False);
 arp.add_argument("-z", "--zzzz", help="Continue working with -EVERY- virtual machine on the cloud right now. Dev use mainly. Implies -k", action="store_true", default=False)
 arp.add_argument("-k", "--keep", help="Keep VMs; Do not delete VMs used for testing at end of test. -z/--zzzz option implies this.", action="store_true", default=False)
@@ -334,8 +332,6 @@ def runStaggeredJobs(j, delay, tout=3600):
     #checkJobOutput(j, jobData)
     if VERBOSE: logger('Finished staggered jobs.');
     return jobData;
-
-
 
 def filterAPIOutput(data):
     if type(data) is not list:
@@ -788,6 +784,10 @@ class Job(object):
                 if not CONTINUE_MODE: raise
                 FAILURES += 1
                 if FAILURES >= FAILURE_LIMIT: raise OnappException('{}.run{}'.format(self.action), self.data, "Failure limit has been reached.")
+            except:
+                print "!!!!! ERROR OCCURRED INSIDE JOB {} : {} !!!!!\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!".format(self.action, sys.exc_info()[0])
+                print str(self.data)
+                raise
         if type(data) is dict and len(data.keys()) == 1:
             return data.values()[0];
         else:
@@ -810,7 +810,10 @@ class Job(object):
                 print "Error in job {}"
                 if not CONTINUE_MODE: raise
                 FAILURES += 1
-                if FAILURES >= FAILURE_LIMIT: raise OnappException('{}.run{}'.format(self.action), self.data, "Failure limit has been reached.")
+                if FAILURES >= FAILURE_LIMIT: raise OnappException('{}.timedRun{}'.format(self.action), self.data, "Failure limit has been reached.")
+            except:
+                print "!!!!! ERROR OCCURRED INSIDE JOB {} : {} !!!!!\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!".format(self.action, sys.exc_info()[0])
+                raise
         timeTook = datetime.now() - beginTime;
         if type(data) is dict and len(data.keys()) == 1:
             return (data.values()[0], timeTook);
@@ -1351,6 +1354,9 @@ def generateJobsBatch(tvms, count, defData={}):
             if 'ddparams' in defData.keys():
                 d=defData['ddparams']
                 cjob.addData(interval=d['interval'], ratio=d['writes'], dd_bs=d['dd_bs'], dd_count=d['dd_count'], virtual_machine=curvm)
+            else:
+                cjob.addData(interval=DEFAILTS['interval'], ratio=DEFAULTS['ratio'], \
+                    dd_bs=DEFAULTS['dd_bs'], dd_count=DEFAULTS['dd_count'], virtual_machine=curvm)
             jobs.append( cjob )
         if j[0] == 'stopStartVM':
             jobs.append(Job('stopStartVM',curvm))
@@ -1489,7 +1495,11 @@ def watchVMWorkload(data):
     beginTime = datetime.datetime.now()
     proc = {}
     job = Job('CheckVMWorkload', data['virtual_machine'])
-    while datetime.datetime.now() - beginTime < datetime.timedelta(seconds=data['duration']):
+    if type(data['duration']) is datetime.timedelta:
+        duration = data['duration'];
+    else:
+        duration = datetime.timedelta(seconds=duration)
+    while datetime.datetime.now() - beginTime < duration:
         if job.run() is not True:
             elapsed = datetime.datetime.now() - beginTime
             if CONTINUE_MODE:
@@ -1527,204 +1537,6 @@ def gatherIOPSData(vms, period=0):
     f.flush();
     f.close();
     return jobData;
-#
-# def runBurninTest():
-#     migrateCount=backvmCount=resizeCount=0;
-#     timeDict = [];
-#     #c = raw_input('Would you like to run a preliminary test to ensure things work? [y/n]: ');
-#     #if c in ['y', 'Y']: prelimTest(hvs);
-#     if not quiet: print('Preparing for burn in test');
-#     hvs = dListHVsFromZone(HVZONE);
-#     if defaults: numvm = 10
-#     else: numvm = int(raw_input('Provide the number of virtual machines on each hypervisor(Default 10): ') or 10);
-#     diffr = int((float(numvm)*len(hvs)+1)/2.0)
-#     if autoyes or defaults: migr = 'y'
-#     else:
-#         migr = raw_input('Perform migrates?([y]/n): ') or 'y';
-#         while migr not in ['y', 'Y', 'n', 'N']:
-#             migr = raw_input('Invalid, y/n?: ');
-#     if migr in ['y', 'Y']:
-#         if not quiet: print('Enabling migration');
-#         logger('Enabling migration\n');
-#         if defaults: migrateCount = diffr;
-#         else: migrateCount = raw_input('How many migrations total?(Default: {}): '.format(diffr) if not quiet else 'Total migrations?:') or diffr;
-#         migr = True;
-#     elif migr in ['n', 'N']:
-#         if not quiet: print('Disabling migration');
-#         logger('Disabling migration\n');
-#         migr = False;
-#     if autoyes or defaults:
-#         backvms = 'y'
-#     else:
-#         backvms = raw_input('\nPerform backup/restores?([y]/n): ') or 'y';
-#         while backvms not in ['y', 'Y', 'n', 'N']:
-#             backvms = raw_input('Invalid, y/n?: ');
-#     if backvms in ['n', 'N']:
-#         if not quiet: print('Disabling backup/restore');
-#         logger('Disabling backup/restore\n');
-#         backvms = False;
-#     elif backvms in ['y', 'Y']:
-#         if not quiet: print('Enabling backup/restore');
-#         logger('Enabling backup/restore\n');
-#         backvms = True;
-#         if defaults:
-#             backvmCount = diffr;
-#         else:
-#             backvmCount = raw_input('Backups to take and restore?(Default: {}): '.format(diffr) if not quiet else 'Total backups: ') or diffr;
-#     if autoyes or defaults:
-#         resizedisks = 'y';
-#     else:
-#         resizedisks = raw_input('\nPerform disk resizes?([y]/n): ') or 'y';
-#         while resizedisks not in ['y', 'Y', 'n', 'N']:
-#             resizedisks = raw_input('Invalid, y/n?: ');
-#     if resizedisks in ['y', 'Y']:
-#         if not quiet: print('Enabling disk resizes');
-#         logger('Enabling disk resizes.\n');
-#         resizedisks = True;
-#         if defaults:
-#             resizeCount = diffr;
-#             resizeTarget = 10;
-#         else:
-#             resizeCount = raw_input('Number of disk resizes to perform(Default: {}): '.format(diffr) if not quiet else 'Total resizes: ') or diffr;
-#             resizeTarget = raw_input('Target disk size in GB to resize to(Default 10): ' if not quiet else 'Target disk size: ') or 10;
-#     elif resizedisks in ['n', 'N']:
-#         if not quiet: print('Disabling disk resizes');
-#         logger('Disabling disk resizes.\n');
-#         resizedisks = False;
-#     template = getTemplate();
-#     ds = getDatastore(hvs);
-#     #    if resizeCount  == -1: resizeCount  = int((float(numvm)*len(hvs)+1)/2.0)
-#     #    if migrateCount == -1: migrateCount = int((float(numvm)*len(hvs)+1)/2.0)
-#     #    if backvmCount  == -1: backvmCount  = int((float(numvm)*len(hvs)+1)/2.0)
-#     if defaults: duration = 1200;
-#     else: duration = float(raw_input('Provide the number of minutes to run the read/write burnin test(Default 20): ') or 20)*60.0;
-#     workParams = {'interval':10, 'writes':0, 'bs':'10M', 'count':10};
-#     wp = [10, 0, '10M', 10];
-#     if not defaults: print('Default dd parameters: {}'.format(str(workParams)));
-#     if defaults:
-#         noyes = 'n'
-#     else:
-#         noyes = raw_input('Customize dd parameters? (y/[n]): ') or 'n';
-#     if noyes in ['y', 'Y']:
-#         wp[0] = raw_input('Interval(Seconds to sleep between workloads): ' if not quiet else 'Interval :');
-#         wp[1] = raw_input('Write %(Percentage of time writing, else reading): ' if not quiet else 'Write%: ');
-#         wp[2] = raw_input('Block size(Block read/write size, dd\'s bs param): ' if not quiet else 'BlockSize: ');
-#         wp[3] = raw_input('Count(Block count for dd): ' if not quiet else 'Count: ');
-#         workParams = {'interval':wp[0], 'writes':wp[1], 'bs':wp[2], 'count':wp[3]};
-#         logger('Custom dd parameters: {}'.format(workParams));
-#     if autoyes:
-#         confirm = 'Y'
-#     else:
-#         confirm = raw_input('Are you sure you would like to start this test? (Y/N): ')
-#     while confirm not in ['y', 'Y', 'n', 'N']:
-#         confirm = raw_input('Invalid input, Y/N? ')
-#     if confirm in ['n', 'N']:
-#         print('Stopping test.')
-#         logger('Test cancelled.\n')
-#         return;
-#     print('\nStarting test.\n');
-#     print('Creating VMs.');
-#     tt = time.time();
-#     vms = createWorkerVMs(numvm, hvs, template, ds);
-#     timeDict.append('Seconds to create {} worker VMs: {}'.format(int(numvm)*len(hvs),round(float(time.time())-float(tt),2)));
-#
-#     if backvms:
-#         print('Starting VM Backups.');
-#         tt = time.time();
-#         backupData = takeBackups(vms, backvmCount);
-#         timeDict.append('Seconds to take {} backups: {}'.format(backvmCount, round(float(time.time())-float(tt),2)));
-#
-#     print('Starting read/write workloads.');
-#     workerData = startVMWorkers(vms, workParams);
-#
-#     print('Watching workloads for duration, {} seconds.'.format(duration));
-#     watcherData = watchWorkloads(vms, duration, workParams);
-#
-#     print('Stopping workers and getting work data')
-#     workerData = stopVMWorkers(vms);
-#
-#
-#     if False in [ t[1] for t in watcherData ]:
-#         if autoyes or defaults: noyes = 'y'
-#         else: noyes = raw_input('One or more VM Workloads was marked stopped at the end of the test. Proceed anyways? ([y]/n): ') or 'y'
-#         if noyes in ['n', 'N']:
-#             raise OnappException(vms, "VM Workload Monitor")
-#         if noyes in ['y', 'Y']:
-#             print('Proceeding with rest of tests.');
-#
-#     worklogDat = getWorkLogs(vms);
-#
-#     print('Read/write test completed. Saved worklog and IOPS data in {}.'.format(DATA_FILE));
-#
-#     print('Stopping and starting all VMs in random order.');
-#     tt = time.time();
-#     randomVMReboots(vms);
-#     timeDict.append('Seconds to stop and start {} VMs randomly: {}'.format(int(numvm)*len(hvs), round(float(time.time())-float(tt),2)))
-#
-#     if backvms:
-#         print('Restoring backups.');
-#         tt = time.time();
-#         restoreBackupData = restoreBackups(backupData);
-#         timeDict.append('Seconds to restore {} taken backups: {}'.format(backvmCount, round(float(time.time())-float(tt),2)))
-#
-#     # migrates, disk resizes.
-#     if migr:
-#         print('Starting migrations.');
-#         tt = time.time();
-#         migrateData = runMigrates(vms, migrateCount);
-#         timeDict.append('Seconds to run {} migrations: {}'.format(migrateCount, round(float(time.time())-float(tt),2)));
-#         print('Finished migrations.');
-#
-#     if resizedisks:
-#         print('Starting disk resizes.');
-#         tt = time.time();
-#         resizeDisksData = resizeVMDisks(vms, resizeCount, resizeTarget);
-#         timeDict.append('Seconds to resize {} disks to {}GB: {}'.format(len(resizeDisksData), resizeTarget,round(float(time.time())-float(tt),2)));
-#         print('Finished resizing disks.');
-#
-#     print('\nPrinting some information. The rest is found in the {} file.\n\n'.format(DATA_FILE));
-#
-#     iopsData = gatherIOPSData(vms);
-#     processIOPSOutput(iopsData);
-#
-#     vhvs = {};
-#     # { '10.0.0.2':[vm, vm, vm], '10.0.0.4':[vm, vm, vm] }
-#     # scan by hvs variable not vhvs to get correct order.
-#     for worklog in worklogDat:
-#         if worklog['vm']['hv_ip'] in vhvs:
-#             vhvs[worklog['vm']['hv_ip']].append(worklog)
-#         else:
-#             vhvs[worklog['vm']['hv_ip']] = [worklog];
-#
-#     for hv in hvs:
-#         print('Stats for {} @ {}:'.format(hv['label'], hv['ip_address']));
-#         for vm in vhvs[hv['ip_address']]:
-#             if len(vm['results']['writes']) == 0 and len(vm['results']['reads']) == 0:
-#                 print(' VM ID {} has no results.'.format(vm['vm']['id']));
-#             elif len(vm['results']['writes']) == 0 and len(vm['results']['reads']) != 0:
-#                 avgread = round(sum(vm['results']['reads'])/float(len(vm['results']['reads'])), 2)
-#                 print(' VM ID: {}, avg reads: {} MB/s'.format(vm['vm']['id'], avgread))
-#             elif len(vm['results']['writes']) != 0 and len(vm['results']['reads']) == 0:
-#                 avgwrite = round(sum(vm['results']['writes'])/float(len(vm['results']['writes'])), 2)
-#                 print(' VM ID: {}, avg writes: {} MB/s'.format(vm['vm']['id'], avgwrite));
-#             else:
-#                 avgwrite = round(sum(vm['results']['writes'])/float(len(vm['results']['writes'])), 2)
-#                 avgread = round(sum(vm['results']['reads'])/float(len(vm['results']['reads'])), 2)
-#                 print(' VM ID: {}, avg read: {} MB/s, avg write: {} MB/s'.format(vm['vm']['id'], avgread, avgwrite))
-#
-#     f = open(DATA_FILE, 'a')
-#     for line in timeDict:
-#         print(line)
-#         f.write('{}\n'.format(line))
-#     f.close();
-#
-#     print('Destroying virtual machines.');
-#     tt = time.time();
-#     unlockJobs = [ ['unlockvm', {'id':vm['id'] }] for vm in testVMs ]
-#     checkJobOutput(unlockJobs, runJobs(unlockJobs))
-#     destroyJobs = [ ['destroyvm', {'id':vm['id'] }] for vm in testVMs ]
-#     checkJobOutput(destroyJobs, runJobs(destroyJobs));
-#     timeDict.append('Seconds to destroy {} worker VMs: {}'.format(int(numvm)*len(hvs),round(float(time.time())-float(tt),2)))
 
 def recoverBatchData():
     if not os.path.isfile(BATCHES_OUTPUT_FILE):
@@ -1770,7 +1582,7 @@ def runBatchesTest(batchSize, restartParams=False):
         delay = int(raw_input('Seconds to delay between batches? (Default: 30): ') or 30);
     elif defaults:
         logger('Using default values for everything.');
-        delay = 10;
+        delay = 30;
         # duration = datetime.timedelta(minutes=720);
         nvms = 10;
     else:
@@ -1964,6 +1776,15 @@ def interfaceCheck(target=False):
         iface_data[iface.split('/')[-1]] = runCmd(['su', 'onapp', '-c', 'ssh -p{} root@{} "{}"'.format(ONAPP_CONFIG['ssh_port'], target, udev_cmd.format(iface))])
     return iface_data;
 
+def generateHourlyStats():
+    cmd = ['su', 'onapp', '-c', 'cd /onapp/interface && RAILS_ENV=production rake vm:generate_hourly_stats']
+    stdout, stderr = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate();
+    stderr = [ x for x in stderr.rstrip('\n').split('\n') if 'WARNING: OnApp configuration key' not in x ]
+    if stderr:
+        logger("Generating hourly stats failed, stderr: {}".format('\n'.join(stderr).strip()))
+        return False
+    return True;
+
 # gotta change this so the
     # jobsList = [('MigrateVM',1), ('EditDisk',2), ('CreateBackup',1), \
     # ('RestoreBackup',2), ('SingleWorkload',2), ('stopStartVM',1)]
@@ -2152,7 +1973,7 @@ def loadConfigFile(f):
     with open(f, 'r') as file:
         content = [ line for line in file.readlines() ]
     config = {}
-    if os.path.isfile(BATCHES_OUTPUT_FILE):
+    if os.path.isfile(BATCHES_OUTPUT_FILE) and os.stat(BATCHES_OUTPUT_FILE).st_size > 0:
         with open(BATCHES_OUTPUT_FILE, 'r') as batchesFile:
             lastbatch = batchesFile.readlines()[-1]
             batchData = eval(lastbatch)
@@ -2178,12 +1999,12 @@ if __name__ == "__main__":
         if not os.path.isfile(file):
             raise EnvironmentError("File does not exist: {}".format(file))
         f_handle = open(file, 'r')
-        content = [ eval(f_handle.strip()) for line in f_handle.readlines() ]
+        content = [ eval(line.strip()) for line in f_handle.readlines() ]
         f_handle.close()
         processed_content = newProcessOutput(content)
         print processed_content;
         f_handle = open("{}.processed".format(file), 'w')
-        f_handle.write(processed_content)
+        f_handle.write(str(processed_content))
         f_handle.flush()
         f_handle.close()
         print "Processed content has been written to {}.processed".format(file)
