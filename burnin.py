@@ -1361,7 +1361,7 @@ def generateJobsBatch(tvms, count, defData={}):
                 d=defData['ddparams']
                 cjob.addData(interval=d['interval'], ratio=d['writes'], dd_bs=d['dd_bs'], dd_count=d['dd_count'], virtual_machine=curvm)
             else:
-                cjob.addData(interval=DEFAuLTS['interval'], ratio=DEFAULTS['writes'], \
+                cjob.addData(interval=DEFAULTS['interval'], ratio=DEFAULTS['writes'], \
                     dd_bs=DEFAULTS['dd_bs'], dd_count=DEFAULTS['dd_count'], virtual_machine=curvm)
             jobs.append( cjob )
         if j[0] == 'stopStartVM':
