@@ -35,18 +35,23 @@ PYTHON_TEST_RESULTS_FILE='burnin_test_results.pydat'
 JSON_TEST_RESULTS_FILE  ='burnin_test_results.json'
 
 FAILURE_LIMIT=25
-FALURES=0
+FAILURES=0
 
 ONAPP_ROOT = '/onapp'
 ONAPP_CONF_DIR="{}/interface/config".format(ONAPP_ROOT);
 ONAPP_CONF_FILE="{}/on_app.yml".format(ONAPP_CONF_DIR);
 DB_CONF_FILE="{}/database.yml".format(ONAPP_CONF_DIR);
 
-DEFAULTS = { \
-    'interval' : 10, \
-    'writes' : 0, \
-    'dd_bs' : '10M', \
-    'dd_count' : 10
+DEFAULTS = {
+    'delay' : 45, # Seconds to delay between batches.
+    'vms_per_hypervisor' : 10, # Virtual machines per hypervisor to build
+    'resizetarget' : 2, # Amount to increase disk size by in EditDisk
+    'maxdisksize' : 20, # Maximum disk size
+    'wlduration' : 3, # Workload Duration in minutes
+    'interval' : 10, # Seconds to pause between performing dd commands
+    'writes' : 0, # Percentage(sort of..) to write to disk instead of read
+    'dd_bs' : '10M', # dd command bs value
+    'dd_count' : 10 ## dd command count value
     }
 
 
@@ -172,7 +177,7 @@ arp.add_argument("-w", "--workers", metavar='N', help="Number of worker processe
 arp.add_argument("-d", "--defaults", help="Automatically do all tests and use default values without prompting.", action="store_true");
 # arp.add_argument("-c", "--contmode", help="Continue Mode; Workloads will be started again if they are detected as stopped.", action="store_true");
 arp.add_argument("-y", "--yes", help="Answer yes to most questions(not custom dd params or error passing)", action="store_true");
-arp.add_argument("-b", "--batch", metavar='N', help="Alter batch weight, default is 1.25*(# VMs). This causes between 62-100\%  of VMs being used per batch", default=False)
+arp.add_argument("-b", "--batch", metavar='N', help="Alter batch weight, default is 1.25*(# VMs). This causes between 62-100 percent of VMs being used per batch", default=False)
 arp.add_argument("-p", "--pretest", metavar='N', help="Number of minutes to run a burnin pretest, which will run disk workloads on all VMs", default=False);
 arp.add_argument("-z", "--zzzz", help="Continue working with -EVERY- virtual machine on the cloud right now. Dev use mainly. Implies -k", action="store_true", default=False)
 arp.add_argument("-k", "--keep", help="Keep VMs; Do not delete VMs used for testing at end of test. -z/--zzzz option implies this.", action="store_true", default=False)
@@ -281,7 +286,6 @@ testVMs = [];
 # simultaneous_migrations_per_hypervisor
 
 
-
 def __runJob__(j):
     return j.run();
 
@@ -291,7 +295,6 @@ def __runTimedJob__(j):
 def runAll(j):
     jobData = [ job.run() for job in j ];
     return jobData;
-
 
 def runParallel(j, timed=False):
     if [job.getAction() for job in j if job.getAction() is not 'VMStatus']:
@@ -607,6 +610,7 @@ def runOnVM(data, raiseErrors=False):
     return stdo;
 
 def getTemplate():
+    if use_existing_virtual_machines: return 0
     if VERBOSE: print('Pulling templates list:');
     templateStoreData = apiCall('/template_store.json')
     avail_templates = {}
@@ -780,14 +784,16 @@ class Job(object):
             try:
                 data = globals()[self.action](self.data);
             except OnappException as err:
-                print "Error in job {}"
+                print "Error in job {}".format(self.action);
                 if not CONTINUE_MODE: raise
+                # error here about failures not being defined
                 FAILURES += 1
                 if FAILURES >= FAILURE_LIMIT: raise OnappException('{}.run{}'.format(self.action), self.data, "Failure limit has been reached.")
             except:
                 print "!!!!! ERROR OCCURRED INSIDE JOB {} : {} !!!!!\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!".format(self.action, sys.exc_info()[0])
                 print str(self.data)
-                raise
+                FAILURES += 1
+                if FAILURES >= FAILURE_LIMIT: raise OnappException('runJob', sys.exc_info()[0], 'Internal errors above {}'.format(FAILURE_LIMIT))
         if type(data) is dict and len(data.keys()) == 1:
             return data.values()[0];
         else:
@@ -1139,7 +1145,7 @@ def stallUntilOnline(vms, timeout=3600, bTime=None):
     logger('Waiting for VMs to come online: {}'.format(','.join([str(v) for v in vm_ids.keys()])))
     while False in vm_ids.values():
         if datetime.datetime.now() - beginTime > datetime.timedelta(seconds=timeout):
-            raise OnappException('Timed out waiting for VMs to come online, still offline:', [t[0] for t in vm_ids.keys() if not vm_ids[t]])
+            raise OnappException('Timed out waiting for VMs to come online, still offline:', [t for t in vm_ids.keys() if not vm_ids[t]])
         jobs = [ Job('VMStatus', {'vm_id':vm}) for vm in vm_ids.keys() if not vm_ids[vm] ]
         if len(jobs) > 1: jobData = runParallel(jobs)
         else: jobData = runAll(jobs)
@@ -1214,7 +1220,7 @@ def stallUntilDeleted(vms, timeout=3600, bTime=None):
     logger('Waiting for VMs to disappear: {}'.format(','.join([str(v) for v in vm_ids.keys()])))
     while False in vm_ids.values():
         if datetime.datetime.now() - beginTime > datetime.timedelta(seconds=timeout):
-            raise OnappException('Timed out waiting for VMs to come online, still offline:', [t[0] for t in vm_ids.keys() if not vm_ids[t]])
+            raise OnappException('Timed out waiting for VMs to delete:', [t[0] for t in vm_ids.keys() if not vm_ids[t]])
         jobs = [ Job('VMStatus', {'vm_id':vm}) for vm in vm_ids.keys() if not vm_ids[vm] ]
         for j in jobs:
             try:
@@ -1355,7 +1361,7 @@ def generateJobsBatch(tvms, count, defData={}):
                 d=defData['ddparams']
                 cjob.addData(interval=d['interval'], ratio=d['writes'], dd_bs=d['dd_bs'], dd_count=d['dd_count'], virtual_machine=curvm)
             else:
-                cjob.addData(interval=DEFAILTS['interval'], ratio=DEFAULTS['ratio'], \
+                cjob.addData(interval=DEFAuLTS['interval'], ratio=DEFAULTS['writes'], \
                     dd_bs=DEFAULTS['dd_bs'], dd_count=DEFAULTS['dd_count'], virtual_machine=curvm)
             jobs.append( cjob )
         if j[0] == 'stopStartVM':
@@ -1372,9 +1378,19 @@ def stopStartVM(vm):
     tmp = Job('StopVM', vm_id=vm['id']).run()
     stallUntilOffline(vm)
     rData['stoptime'] = datetime.datetime.now() - beginTime
+    time.sleep(10)
     beginTime = datetime.datetime.now()
     tmp = Job('StartVM', vm_id=vm['id']).run()
-    stallUntilOnline(vm)
+    try:
+        stallUntilOnline(vm)
+    except OnappException as err:
+        print "Waiting for virtual machine to come online failed, trying to start once more."
+        tmp = Job('StartVM', vm_id=vm['id']).run()
+        try:
+            stallUntilOnline(vm)
+        except OnappException as err:
+            print "!!!!! A virtual machine has failed to start! Please Investigate Control Server !!!!!!!"
+            raise;
     rData['starttime'] = datetime.datetime.now() - beginTime
     rData['vm'] = Job('DetailVM', vm_id=vm['id']).run()
     return rData;
@@ -1545,7 +1561,7 @@ def recoverBatchData():
         return [];
     bFile = open(BATCHES_OUTPUT_FILE, 'r')
     try:
-        bContents = [ eval(l) for l in bFile.readlines() ]
+        bContents = [ ast.literal_eval(l) for l in bFile.readlines() ]
     except (KeyboardInterrupt, SystemExit):
         raise
     except:
@@ -1559,6 +1575,7 @@ def runBatchesTest(batchSize, restartParams=False):
     print('Running in batch mode.');
     logger('Batch mode enabled.');
     hvs = Job('ListHVsInZone', hv_zone_id=HVZONE).run()
+    hvs = [ hv for hv in hvs if hv['online'] ]
     if restartParams:
         if restartParams['defData']['vm_params'] != 0:
             t = restartParams['defData']['vm_params']['template_id']
@@ -1569,7 +1586,9 @@ def runBatchesTest(batchSize, restartParams=False):
     else:
         t = getTemplate();
         ds = getDatastore(HVZONE);
-    defData = {'resizetarget':2, 'maxdisksize': 20, 'wlduration': 3};
+    defData = {'resizetarget':DEFAULTS['resizetarget'], \
+        'maxdisksize': DEFAULTS['maxdisksize'], \
+        'wlduration': DEFAULTS['wlduration']};
     ##### Gather information
     ##### Generate a batch, process entire thing.
     ##### Gather data about each job
@@ -1579,15 +1598,17 @@ def runBatchesTest(batchSize, restartParams=False):
         print "Continuing from previous configuration file."
         # duration = int(raw_input("How many minutes longer should this test be ran? (Default 30): ") or 30)
         # duration = datetime.timedelta(minutes=int(duration));
-        delay = int(raw_input('Seconds to delay between batches? (Default: 30): ') or 30);
+        if defaults: delay = DEFAULTS['delay']
+        else: delay = int(raw_input('Seconds to delay between batches? (Default: 45): ') or DEFAULTS['delay']);
     elif defaults:
         logger('Using default values for everything.');
-        delay = 30;
+        delay = DEFAULTS['delay'];
         # duration = datetime.timedelta(minutes=720);
-        nvms = 10;
+        nvms = DEFAULTS['vms_per_hypevisor'];
     else:
-        if not use_existing_virtual_machines: nvms = raw_input('How many virtual machines per hypervisor? (Default 10): ') or 10;
-        delay = raw_input('Seconds to delay between batches? (Default 30): ') or 30;
+        if not use_existing_virtual_machines:
+            nvms = raw_input('How many virtual machines per hypervisor? (Default 10): ') or DEFAULTS['vms_per_hypervisor'];
+        delay = raw_input('Seconds to delay between batches? (Default 45): ') or DEFAULTS['delay'];
         # duration = raw_input('Duration of test in minutes? (Default 60): ') or 60;
         # duration = datetime.timedelta(minutes=int(duration));
         if autoyes: noyes = 'y';
@@ -1596,22 +1617,27 @@ def runBatchesTest(batchSize, restartParams=False):
             while noyes not in ['n', 'N', 'y', 'Y']:
                 noyes = raw_input("Invalid. (y/n): ")
         if noyes in [ 'y' , 'Y' ]:
-            defData['resizetarget'] = raw_input('How much to increase size for disks in GB(Default 2): ') or 2;
-            defData['maxdisksize'] = raw_input('Maximum disk size in GB(default 20): ') or 20;
-            defData['wlduration'] = raw_input('Workload duration in minutes(Default 3): ') or 3;
+            defData['resizetarget'] = raw_input('How much to increase size for disks in GB(Default 2): ') or DEFAULTS['resizetarget'];
+            defData['maxdisksize'] = raw_input('Maximum disk size in GB(default 20): ') or DEFAULTS['maxdisksize'];
+            defData['wlduration'] = raw_input('Workload duration in minutes(Default 3): ') or DEFAULTS['wlduration'];
         if defaults:
             noyes = 'n'
         else:
             noyes = raw_input('Customize dd parameters? (y/[n]): ') or 'n';
             while noyes not in ['n', 'N', 'y', 'Y']:
                 noyes = raw_input('Invalid. (y/n): ')
-        workParams = {'interval':10, 'writes':0, 'dd_bs':'10M', 'dd_count':10};
+        workParams = {'interval':DEFAULTS['interval'], 'writes':DEFAULTS['writes'], \
+            'dd_bs':DEFAULTS['dd_bs'], 'dd_count':DEFAULTS['dd_count']};
         if noyes in ['y', 'Y']:
             workParams = {};
-            workParams['interval'] = raw_input('Interval(Seconds to sleep between workloads): ' if not quiet else 'Interval :') or 10;
-            workParams['writes'] = raw_input('Write %(Percentage of time writing, else reading): ' if not quiet else 'Write%: ') or 0;
-            workParams['dd_bs'] = raw_input('Block size(Block read/write size, dd\'s bs param): ' if not quiet else 'BlockSize: ') or '10M';
-            workParams['dd_count'] = raw_input('Count(Block count for dd): ' if not quiet else 'Count: ') or 10;
+            workParams['interval'] = raw_input('Interval(Seconds to sleep between workloads): '
+                if not quiet else 'Interval :') or DEFAULTS['interval'];
+            workParams['writes'] = raw_input('Write %(Percentage of time writing, else reading): '
+                if not quiet else 'Write%: ') or DEFAULTS['writes'];
+            workParams['dd_bs'] = raw_input('Block size(Block read/write size, dd\'s bs param): '
+                if not quiet else 'BlockSize: ') or DEFAULTS['dd_bs'];
+            workParams['dd_count'] = raw_input('Count(Block count for dd): '
+                if not quiet else 'Count: ') or DEFAULTS['dd_count'];
             logger('Custom dd parameters: {}'.format(workParams));
         defData['ddparams']=workParams;
         logger('Custom data: {}'.format(str(defData)));
@@ -1649,8 +1675,11 @@ def runBatchesTest(batchSize, restartParams=False):
         defData['vm_params']['template_id'] = t
         defData['datastore_zone_id'] = ds
         vms = createWorkerVMs(nvms, hvs, t, ds, jd);
-    ################## make sure you turn on any VMs which are off right here.
-    stallUntilOnline(vms)
+    for vm in vms:
+        stat = Job('VMStatus', vm_id=vm['id']).run()
+        if stat['booted'] == False:
+            Job('StartVM', vm_id=vm['id']).run()
+    stallUntilOnline(vms, 1000000000)
     runParallel([Job('CopyWorkloadFile', vm) for vm in vms])
     if run_pre_burnin_test: BatchWorkload(vms, defData['ddparams'], run_pre_burnin_test)
     beginTime = datetime.datetime.now();
@@ -1889,7 +1918,7 @@ def gatherConfigData(zone):
         'network_interfaces' : interfaceCheck(), \
         'cpu' : cpuCheck()}
     health_data['zone_data'] = { 'hypervisors': {}, 'backup_servers': {} }
-    hv_data = dpsql("SELECT id, label, ip_address, hypervisor_type FROM hypervisors WHERE hypervisor_group_id={}".format(zone), unlist=False)
+    hv_data = dpsql("SELECT id, label, ip_address, hypervisor_type FROM hypervisors WHERE hypervisor_group_id={} AND online=1".format(zone), unlist=False)
     for hv in hv_data:
         if not quiet: print "Gathering data for hypervisor {} @ {}".format(hv['label'], hv['ip_address'])
         rData = {}
@@ -1910,7 +1939,7 @@ def gatherConfigData(zone):
         rData['network_interfaces'] = interfaceCheck(hv['ip_address'])
         rData['label'] = hv['label']
         health_data['zone_data']['hypervisors'][hv['id']] = rData
-    bs_data = dpsql("SELECT id, label, ip_address FROM backup_servers WHERE id IN (SELECT id FROM backup_server_joins WHERE target_join_type='HypervisorGroup' AND target_join_id={})".format(zone), unlist=False)
+    bs_data = dpsql("SELECT id, label, ip_address FROM backup_servers WHERE enabled=1 AND id IN (SELECT id FROM backup_server_joins WHERE target_join_type='HypervisorGroup' AND target_join_id={})".format(zone), unlist=False)
     if not bs_data: return health_data;
     for bs in bs_data:
         if not quiet: print "Gathering data for backup server {} @ {}".format(bs['label'], bs['ip_address'])
@@ -1952,17 +1981,8 @@ def gatherConfigData(zone):
 #                     'reads':     content[vm][disk]['reads'][n],     \
 #                     'writes':    content[vm][disk]['writes'][n] }
 
-
-
-
 def writeConfigFile(f, defData):
     global testVMs
-    # print "!!!! WRITING CONFIG FILE !!!!"
-    # print "defData:::::"
-    # print str(defData)
-    # print
-    # print "testVMs:::::"
-    # print str(testVMs)
     with open(f, 'w') as file:
         print 'Writing configuration file'
         file.write(str(defData))
@@ -1973,7 +1993,7 @@ def loadConfigFile(f):
     with open(f, 'r') as file:
         content = [ line for line in file.readlines() ]
     config = {}
-    if os.path.isfile(BATCHES_OUTPUT_FILE) and os.stat(BATCHES_OUTPUT_FILE).st_size > 0:
+    if os.path.isfile(BATCHES_OUTPUT_FILE) and os.stat(BATCHES_OUTPUT_FILE).st_size > 32:
         with open(BATCHES_OUTPUT_FILE, 'r') as batchesFile:
             lastbatch = batchesFile.readlines()[-1]
             batchData = eval(lastbatch)
@@ -1999,7 +2019,7 @@ if __name__ == "__main__":
         if not os.path.isfile(file):
             raise EnvironmentError("File does not exist: {}".format(file))
         f_handle = open(file, 'r')
-        content = [ eval(line.strip()) for line in f_handle.readlines() ]
+        content = [ ast.literal_eval(line.strip()) for line in f_handle.readlines() ]
         f_handle.close()
         processed_content = newProcessOutput(content)
         print processed_content;
