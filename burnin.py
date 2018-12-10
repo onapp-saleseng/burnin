@@ -175,6 +175,7 @@ garp.add_argument("-v", "--verbose", help="Verbose output/logging", action="stor
 garp.add_argument("-q", "--quiet", help="Quiet output", action="store_true");
 arp.add_argument("-w", "--workers", metavar='N', help="Number of worker processes for starting jobs. Default: 8", default=8);
 arp.add_argument("-d", "--defaults", help="Automatically do all tests and use default values without prompting.", action="store_true");
+arp.add_argument("-n", "--nonetwork", help="Do NOT use VM network. Disables the Workload job. Use if cannot connect to virtual machines.", action="store_true")
 # arp.add_argument("-c", "--contmode", help="Continue Mode; Workloads will be started again if they are detected as stopped.", action="store_true");
 arp.add_argument("-y", "--yes", help="Answer yes to most questions(not custom dd params or error passing)", action="store_true");
 arp.add_argument("-b", "--batch", metavar='N', help="Alter batch weight, default is 1.25*(# VMs). This causes between 62-100 percent of VMs being used per batch", default=False)
@@ -191,6 +192,7 @@ VERBOSE=args.verbose;
 quiet=args.quiet;
 workers=int(args.workers);
 defaults=args.defaults;
+using_vm_network=not args.nonetwork;
 CONTINUE_MODE=True;  #Previously could change it but I think it's best forced on.
 batchsize=args.batch;
 autoyes=args.yes;
@@ -1157,8 +1159,9 @@ def stallUntilOnline(vms, timeout=3600, bTime=None):
                     JOIN networking_ip_addresses AS ip ON ip.id = nipj.ip_address_id \
                     WHERE vm.id={}".format(j['id']))
                 cmd = ['su','onapp','-c','ssh {} root@{} "uptime"'.format(SSH_OPTIONS, VM_IP)]
-                status = runCmd(cmd)
-                if status is False: continue;
+                if using_vm_network:
+                    status = runCmd(cmd)
+                    if status is False: continue;
                 vm_ids[j['id']] = True;
         time.sleep(2)
     logger('VMs {} have come online.'.format(','.join([str(v) for v in vm_ids.keys()])))
@@ -1300,8 +1303,15 @@ def generateJobsBatch(tvms, count, defData={}):
     vms = tvms[:]
     shuffle(vms);
     # Job name, weight.
-    jobsList = [('MigrateVM',1), ('EditDisk',2), ('CreateBackup',1), \
-    ('RestoreBackup',2), ('SingleWorkload',2), ('stopStartVM',1)]
+    jobsList = [ \
+        ('MigrateVM',1), \
+        ('EditDisk',2), \
+        ('CreateBackup',1), \
+        ('RestoreBackup',2), \
+        ('SingleWorkload',2), \
+        ('stopStartVM',1) \
+    ]
+    if using_vm_network: jobsList.append(('SingleWorkload',2))
     # ('CreateVM',3), ('DestroyVM',2)];
     jobs = [];
     weight=0;
@@ -1604,7 +1614,7 @@ def runBatchesTest(batchSize, restartParams=False):
         logger('Using default values for everything.');
         delay = DEFAULTS['delay'];
         # duration = datetime.timedelta(minutes=720);
-        nvms = DEFAULTS['vms_per_hypevisor'];
+        nvms = DEFAULTS['vms_per_hypervisor'];
     else:
         if not use_existing_virtual_machines:
             nvms = raw_input('How many virtual machines per hypervisor? (Default 10): ') or DEFAULTS['vms_per_hypervisor'];
