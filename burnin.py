@@ -786,8 +786,7 @@ class Job(object):
             try:
                 data = globals()[self.action](self.data);
             except OnappException as err:
-                print "Error in job {}".format(self.action);
-                if not CONTINUE_MODE: raise
+                print "Error in job {} : {}".format(self.action, sys.exc_info()[0]);
                 # error here about failures not being defined
                 FAILURES += 1
                 if FAILURES >= FAILURE_LIMIT: raise OnappException('{}.run{}'.format(self.action), self.data, "Failure limit has been reached.")
@@ -1249,7 +1248,12 @@ def stallUntilBackupBuilt(backup, timeout=3600):
     while not backupStatus['built']:
         if datetime.datetime.now() - beginTime > datetime.timedelta(seconds=timeout):
             raise OnappException('Timed out waiting for backup to build', [t[0] for t in vm_ids.keys() if not vm_ids[t]])
-        backupStatus = Job('DetailBackup', backup_id=backup['id']).run()
+        try:
+            backupStatus = Job('DetailBackup', backup_id=backup['id']).run()
+        except HTTPError as err:
+            if err.code == 404:
+                logger('Backup {} appears to have failed.'.format(backup['id']))
+                raise OnappException('Backup ID {} failed since it disappeared.'.format(backup['id']))
         time.sleep(2)
     time.sleep(1)
     logger('Backup ID {} has been built.'.format(backup['id']))
@@ -1709,6 +1713,7 @@ def runBatchesTest(batchSize, restartParams=False):
         for vm in vms:
             stat = Job('VMStatus', vm_id=vm['id']).run()
             if stat['booted'] == False:
+                logger('Starting VM ID {0}'.format(vm['id']))
                 Job('StartVM', vm_id=vm['id']).run()
         stallUntilOnline(vms)
         jobs = generateJobsBatch(vms, batchSize, defData);
