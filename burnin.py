@@ -1156,13 +1156,13 @@ def stallUntilOnline(vms, timeout=3600, bTime=None):
         else: jobData = runAll(jobs)
         for j in jobData:
             if j['booted'] and j['built'] and not j['locked']:
-                VM_IP = dsql("SELECT INET_NTOA(ip.address) FROM virtual_machines AS vm \
-                    JOIN networking_network_interfaces AS nif ON nif.virtual_machine_id = vm.id \
-                    JOIN networking_ip_address_joins AS nipj ON nipj.network_interface_id = nif.id \
-                    JOIN networking_ip_addresses AS ip ON ip.id = nipj.ip_address_id \
-                    WHERE vm.id={}".format(j['id']))
-                cmd = ['su','onapp','-c','ssh {} root@{} "uptime"'.format(SSH_OPTIONS, VM_IP)]
                 if using_vm_network:
+                    VM_IP = dsql("SELECT INET_NTOA(ip.address) FROM virtual_machines AS vm \
+                        JOIN networking_network_interfaces AS nif ON nif.virtual_machine_id = vm.id \
+                        JOIN networking_ip_address_joins AS nipj ON nipj.network_interface_id = nif.id \
+                        JOIN networking_ip_addresses AS ip ON ip.id = nipj.ip_address_id \
+                        WHERE vm.id={}".format(j['id']))
+                    cmd = ['su','onapp','-c','ssh {} root@{} "uptime"'.format(SSH_OPTIONS, VM_IP)]
                     status = runCmd(cmd)
                     if status is False: continue;
                 vm_ids[j['id']] = True;
@@ -1298,17 +1298,47 @@ def batchRunnerJob(data):
     vmdeets = Job('DetailVM', vm_id=data['vm_id']).run()
     vmdisks = Job('ListVMDisks', vm_id=data['vm_id']).run()
     if data['func'] == 'MigrateVM':
-        stallUntilOnline(vmdeets)
+        try:
+            stallUntilOnline(vmdeets)
+        except OnappException as err:
+            print "Waiting for virtual machine {} to come online failed, trying to start once more.".format(vmdeets['id'])
+            tmp = Job('UnlockVM', vm_id=vmdeets['id']).run()
+            tmp = Job('StartVM', vm_id=vmdeets['id']).run()
+            try:
+                stallUntilOnline(vmdeets)
+            except OnappException as err:
+                print "!!!!! A virtual machine has failed to start thrice! Please Investigate Control Server !!!!!!!"
+                raise;
         new_output = {'origin':vmdeets['hypervisor_id'], 'destination':params['destination']}
         return {'output':new_output, 'vm':vmdeets, 'time':datetime.datetime.now() - beginTime}
     if data['func'] == 'EditDisk':
         time.sleep(10)
-        stallUntilOnline(vmdeets)
+        try:
+            stallUntilOnline(vmdeets)
+        except OnappException as err:
+            print "Waiting for virtual machine {} to come online failed, trying to start once more.".format(vmdeets['id'])
+            tmp = Job('UnlockVM', vm_id=vmdeets['id']).run()
+            tmp = Job('StartVM', vm_id=vmdeets['id']).run()
+            try:
+                stallUntilOnline(vmdeets)
+            except OnappException as err:
+                print "!!!!! A virtual machine has failed to start thrice! Please Investigate Control Server !!!!!!!"
+                raise;
         new_output = {'start_size':vmdisks[0]['disk_size'], \
         'increase': int(data['disk_size']) - int(vmdisks[0]['disk_size'])}
         return {'vm':vmdeets, 'time':datetime.datetime.now() - beginTime, 'output':new_output}
     if data['func'] == 'RestoreBackup':
-        stallUntilOnline(vmdeets)
+        try:
+            stallUntilOnline(vmdeets)
+        except OnappException as err:
+            print "Waiting for virtual machine {} to come online failed, trying to start once more.".format(vmdeets['id'])
+            tmp = Job('UnlockVM', vm_id=vmdeets['id']).run()
+            tmp = Job('StartVM', vm_id=vmdeets['id']).run()
+            try:
+                stallUntilOnline(vmdeets)
+            except OnappException as err:
+                print "!!!!! A virtual machine has failed to start thrice! Please Investigate Control Server !!!!!!!"
+                raise;
         new_output = {'backup_id':data['backup_id']}
         return {'vm':vmdeets, 'time':datetime.datetime.now() - beginTime, 'output':new_output}
     if data['func'] == 'CreateIncrementalBackup':
