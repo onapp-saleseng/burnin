@@ -169,7 +169,7 @@ except ImportError:
 
 ### There are too many arguments here.
 ####################################
-arp = argparse.ArgumentParser(prog='nuburn', description='Burn-in script for OnApp');
+arp = argparse.ArgumentParser(prog='burnin', description='Burn-in script for OnApp');
 garp= arp.add_mutually_exclusive_group();
 garp.add_argument("-v", "--verbose", help="Verbose output/logging", action="store_true");
 garp.add_argument("-q", "--quiet", help="Quiet output", action="store_true");
@@ -187,6 +187,7 @@ arp.add_argument("-t", "--token", metavar='T', help="Token for submitting to the
 arp.add_argument("-u", "--user", metavar='U', help="User ID which has API key and permissions. Default is 1 (admin).", default=1)
 arp.add_argument("-i", "--iops", metavar='H', help="Just pull IOPS and process them from the past H hours.", default=False)
 arp.add_argument("-m", "--minutes", metavar='M', help="Number of minutes to run the test for.", default=720)
+arp.add_argument("--clean", help="Delete all VMs used in test from previous failure.", action="store_true")
 args = arp.parse_args();
 VERBOSE=args.verbose;
 quiet=args.quiet;
@@ -205,8 +206,7 @@ USER_ID=args.user;
 just_iops_duration=args.iops;
 ONLY_GENERATE_OUTPUT=args.generate;
 DURATION_MINUTES=args.minutes
-
-
+CLEAN_TEST_VMS=args.clean;
 ####################################
 
 def pullDBConfig(f):
@@ -785,16 +785,20 @@ class Job(object):
                 raise ValueError('{} is not valid for a Job action.'.format(self.action))
             try:
                 data = globals()[self.action](self.data);
+            except HTTPError: raise;
             except OnappException as err:
                 print "Error in job {} : {}".format(self.action, sys.exc_info()[0]);
                 # error here about failures not being defined
                 FAILURES += 1
                 if FAILURES >= FAILURE_LIMIT: raise OnappException('{}.run{}'.format(self.action), self.data, "Failure limit has been reached.")
+                return False;
             except:
-                print "!!!!! ERROR OCCURRED INSIDE JOB {} : {} !!!!!\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!".format(self.action, sys.exc_info()[0])
+                e = sys.exc_info()
+                print "!!!!! ERROR OCCURRED INSIDE JOB {} : {} line {} !!!!!\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!".format(self.action, e, e[2].tb_lineno)
                 print str(self.data)
                 FAILURES += 1
                 if FAILURES >= FAILURE_LIMIT: raise OnappException('runJob', sys.exc_info()[0], 'Internal errors above {}'.format(FAILURE_LIMIT))
+                return False;
         if type(data) is dict and len(data.keys()) == 1:
             return data.values()[0];
         else:
@@ -819,7 +823,7 @@ class Job(object):
                 FAILURES += 1
                 if FAILURES >= FAILURE_LIMIT: raise OnappException('{}.timedRun{}'.format(self.action), self.data, "Failure limit has been reached.")
             except:
-                print "!!!!! ERROR OCCURRED INSIDE JOB {} : {} !!!!!\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!".format(self.action, sys.exc_info()[0])
+                print "!!!!! ERROR OCCURRED INSIDE JOB {} : {} !!!!!\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!".format(self.action, sys.exc_info())
                 raise
         timeTook = datetime.now() - beginTime;
         if type(data) is dict and len(data.keys()) == 1:
@@ -832,10 +836,8 @@ def checkKeys(data, reqKeys):
     dk = data.keys();
     caller = inspect.stack()[1][3];
     for k in reqKeys:
-        if k not in dk: raise KeyError('{} requires key {}'.format(caller, k))
+        if k not in dk: raise KeyError('{} requires data key {}'.format(caller, k))
 
-# def apiCall(r, data=None, method=None):
-#     req = Request("{}{}".format(API_TARGET, r), data)
 def apiCall(r, data=None, method='GET', target=API_TARGET, auth=API_AUTH):
     req = Request("{}{}".format(target, r), json.dumps(data))
     if auth: req.add_header("Authorization", "Basic {}".format(auth))
@@ -852,9 +854,11 @@ def apiCall(r, data=None, method='GET', target=API_TARGET, auth=API_AUTH):
     except HTTPError as err:
         caller = inspect.stack()[1][3];
         print caller,"called erroneous API request: {}{}, error: {}".format(target, r, err)
-        if r.endswith('status.json'): raise;
-        else: return False;
-    status = response.getcode()
+        status = response.getcode()
+        # if r.endswith('status.json'): raise;
+        # else: return False;
+        raise;
+    if not status: status = response.getcode()
     if VERBOSE and 'status.json' not in r: logger('API Call executed - {}{}, Status code: {}'.format(API_TARGET, r, status));
     apiResponse = response.read().replace('null', 'None').replace('true', 'True').replace('false', 'False')
     if apiResponse != '':
@@ -1081,7 +1085,7 @@ def SingleWorkload(data):
             job = Job('StartVMWorkload', data).run()
             checks+=1
             if checks == 10:
-                raise OnappException('SingleWorkload', 'Workload failed to start on virtual machine id {}'.format(data['virtual_machine']['id']))
+                raise OnappException('SingleWorkload', 'Workload failed to start 10 times on virtual machine id {}'.format(data['virtual_machine']['id']))
             print "Trying again ({})...".format(checks)
     dur = datetime.timedelta(minutes=int(data['duration']))
     wData = data.copy()
@@ -1242,7 +1246,14 @@ def stallUntilDeleted(vms, timeout=3600, bTime=None):
 def stallUntilBackupBuilt(backup, timeout=3600):
     beginTime = datetime.datetime.now()
     logger('Waiting for backup ID {} to be built.'.format(backup['id']))
-    backupStatus = Job('DetailBackup', backup_id=backup['id']).run()
+    try:
+        backupStatus = Job('DetailBackup', backup_id=backup['id']).run()
+    except HTTPError as err:
+        if err.code == 404:
+            logger('Backup {} appears to have failed.'.format(backup['id']))
+            raise OnappException('Backup ID {} failed since it disappeared.'.format(backup['id']), 'stallUntilBackupBuilt')
+        else:
+            raise
     if backupStatus['built']: return True
     else: time.sleep(5)
     while not backupStatus['built']:
@@ -1253,7 +1264,9 @@ def stallUntilBackupBuilt(backup, timeout=3600):
         except HTTPError as err:
             if err.code == 404:
                 logger('Backup {} appears to have failed.'.format(backup['id']))
-                raise OnappException('Backup ID {} failed since it disappeared.'.format(backup['id']))
+                raise OnappException('Backup ID {} failed since it disappeared.'.format(backup['id']), 'stallUntilBackupBuilt')
+            else:
+                raise
         time.sleep(2)
     time.sleep(1)
     logger('Backup ID {} has been built.'.format(backup['id']))
@@ -1275,8 +1288,6 @@ def batchRunnerJob(data):
     beginTime = datetime.datetime.now();
     params = data.copy()
     del params['func']
-    vmdeets = Job('DetailVM', vm_id=data['vm_id']).run()
-    vmdisks = Job('ListVMDisks', vm_id=data['vm_id']).run()
     if VERBOSE:
         print "Starting Job", data['func']
     try:
@@ -1284,6 +1295,8 @@ def batchRunnerJob(data):
     except HTTPError as err:
         print "HTTP ERROR", err
         raise
+    vmdeets = Job('DetailVM', vm_id=data['vm_id']).run()
+    vmdisks = Job('ListVMDisks', vm_id=data['vm_id']).run()
     if data['func'] == 'MigrateVM':
         stallUntilOnline(vmdeets)
         new_output = {'origin':vmdeets['hypervisor_id'], 'destination':params['destination']}
@@ -1312,7 +1325,6 @@ def generateJobsBatch(tvms, count, defData={}):
         ('EditDisk',2), \
         ('CreateBackup',1), \
         ('RestoreBackup',2), \
-        ('SingleWorkload',2), \
         ('stopStartVM',1) \
     ]
     if using_vm_network: jobsList.append(('SingleWorkload',2))
@@ -1399,6 +1411,7 @@ def stopStartVM(vm):
         stallUntilOnline(vm)
     except OnappException as err:
         print "Waiting for virtual machine to come online failed, trying to start once more."
+        tmp = Job('UnlockVM', vm_id=vm['id']).run()
         tmp = Job('StartVM', vm_id=vm['id']).run()
         try:
             stallUntilOnline(vm)
@@ -1693,8 +1706,8 @@ def runBatchesTest(batchSize, restartParams=False):
         stat = Job('VMStatus', vm_id=vm['id']).run()
         if stat['booted'] == False:
             Job('StartVM', vm_id=vm['id']).run()
-    stallUntilOnline(vms, 1000000000)
-    runParallel([Job('CopyWorkloadFile', vm) for vm in vms])
+    stallUntilOnline(vms, 240)
+    if using_vm_network: runParallel([Job('CopyWorkloadFile', vm) for vm in vms])
     if run_pre_burnin_test: BatchWorkload(vms, defData['ddparams'], run_pre_burnin_test)
     beginTime = datetime.datetime.now();
     batchNum = 0;
@@ -1707,14 +1720,30 @@ def runBatchesTest(batchSize, restartParams=False):
     if not restartParams: writeConfigFile(CONFIG_FILE, defData)
     elif not not restartParams['latest']: batchNum = restartParams['latest'][0]
     else: batchNum = 0;
+    DS_IDENTIFIER = False;
+    if ds != 0: DS_IDENTIFER = dsql('SELECT identifier FROM data_stores WHERE id={}'.format(ds))
     while datetime.datetime.now() - beginTime < duration:
         batchNum+=1;
         if VERBOSE: print 'Ensuring VM\'s are online.'
-        for vm in vms:
-            stat = Job('VMStatus', vm_id=vm['id']).run()
+        vm_statuses = runParallel( [ Job('VMStatus', vm_id=vm['id']) for vm in vms ] )
+        for stat in vm_statuses:
             if stat['booted'] == False:
-                logger('Starting VM ID {0}'.format(vm['id']))
-                Job('StartVM', vm_id=vm['id']).run()
+                logger('Starting VM ID {}'.format(stat['id']))
+                Job('StartVM', vm_id=stat['id']).run();
+        if DS_IDENTIFIER:
+            if VERBOSE: print "Ensuring there are no degraded disks."
+            for hv in hvs:
+                degraded_disks = stapi(hv['ip_address'], '/is/Datastore/{}'.format(DS_IDENTIFIER), json.dumps({'state':2}), method='PUT')['degraded_vdisks']
+                if degraded_disks != '':
+                    print "Degraded disks have been found. Refusing to continue. Please investigate disks: {}".format(degraded_disks)
+                    print "Once disk issues have been resolved, restart script."
+                    print "If issues cannot be resolved and VMs must be deleted, rerun script with the --clean flag."
+                    sys.exit()
+        # for vm in vms:
+        #     stat = Job('VMStatus', vm_id=vm['id']).run()
+        #     if stat['booted'] == False:
+        #         logger('Starting VM ID {0}'.format(vm['id']))
+        #         Job('StartVM', vm_id=vm['id']).run()
         stallUntilOnline(vms)
         jobs = generateJobsBatch(vms, batchSize, defData);
         print "Batch ID {}, # of Jobs: {}".format(batchNum, len(jobs))
@@ -1730,6 +1759,8 @@ def runBatchesTest(batchSize, restartParams=False):
         if VERBOSE:
             print('Batch {} completed, data: {}'.format(batchNum, jobData))
         else: print('Batch {} completed.'.format(batchNum));
+        ########### TODO check for degraded disks ##############
+        # diskstatus = stapi(HV_IP, '/is/Datastore/{}'.format(ID_DS_IDENTIFIER), json.dumps({'state':2}), method='PUT' )
         # checkJobOutput(jobs, jobData);
         time.sleep(float(delay));
     output_file.close();
@@ -1741,8 +1772,8 @@ def runBatchesTest(batchSize, restartParams=False):
     destroyJobs = False
     if not use_existing_virtual_machines:
         print('Time completed. Cleaning up virtual machines.');
-        unlockJobs = [ Job('UnlockVM', {'vm_id':vm['id']}) for vm in testVMs ]
-        destroyJobs= [ Job('DeleteVM', {'vm_id':vm['id']}) for vm in testVMs ]
+        unlockJobs = [ Job('UnlockVM', vm_id=vm['id']) for vm in testVMs ]
+        destroyJobs= [ Job('DeleteVM', vm_id=vm['id'], destroy_all_backups=1) for vm in testVMs ]
     else:
         print('Not destroying VMs since they were not created by this run.')
     return unlockJobs, destroyJobs, allData, defData
@@ -1842,6 +1873,7 @@ def newProcessOutput(content):
         for ii in xrange(len(c[2])):
             curAction = c[2][ii]
             curData = c[3][ii]
+            if curData is False: continue;
             if curAction == 'SingleWorkload':
                 batches[batchNum]['tests'][ii] = { \
                         'virtual_machine_id':curData['vm_id'], \
@@ -2019,7 +2051,6 @@ def loadConfigFile(f):
     config['testVMs'] = eval(content[1])
     return config;
 
-
 class OnappException(Exception):
     def __init__(self, d, f, reason=False):
         self.data = d;
@@ -2029,6 +2060,13 @@ class OnappException(Exception):
         if self.reason is not False: print('Reason: {}'.format(reason))
 
 if __name__ == "__main__":
+    if CLEAN_TEST_VMS:
+        vms = loadConfigFile(CONFIG_FILE)['testVMs']
+        deletejobs = [ Job('DeleteVM', vm_id=vm['id'], destroy_all_backups=1) for vm in vms ]
+        print "Deleting all test VMs."
+        runParallel(deletejobs)
+        print "Delete jobs should be running now. Please monitor through interface."
+        sys.exit()
     if ONLY_GENERATE_OUTPUT:
         file = ONLY_GENERATE_OUTPUT
         if not os.path.isfile(file):
@@ -2043,6 +2081,7 @@ if __name__ == "__main__":
         f_handle.flush()
         f_handle.close()
         print "Processed content has been written to {}.processed".format(file)
+        sys.exit()
     beginTime = datetime.datetime.now()
     if just_iops_duration is not False:
         if not os.path.isfile(CONFIG_FILE) or os.stat(CONFIG_FILE).st_size < 8:
@@ -2097,7 +2136,7 @@ if __name__ == "__main__":
         else:
             HVZONE = getHVZone();
     if DELETE_VMS and not use_existing_virtual_machines and not restartParameters:
-        actually_delete = raw_input("Are you sure you wish to delete the virtual machines after the test is complete? (Y/N)")
+        actually_delete = raw_input("Are you sure you wish to delete the virtual machines used after the test is complete? (Y/N)")
         while actually_delete not in ['Y', 'N']:
             actually_delete = raw_input('Invalid. (Y/N)?')
         if actually_delete == 'Y':
