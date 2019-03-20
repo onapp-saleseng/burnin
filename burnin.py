@@ -851,6 +851,7 @@ def apiCall(r, data=None, method='GET', target=API_TARGET, auth=API_AUTH):
             response = urlopen(req, context=ssl_context)
         else:
             response = urlopen(req)
+        status = response.getcode();
     except HTTPError as err:
         caller = inspect.stack()[1][3];
         print caller,"called erroneous API request: {}{}, error: {}".format(target, r, err)
@@ -858,7 +859,10 @@ def apiCall(r, data=None, method='GET', target=API_TARGET, auth=API_AUTH):
         # if r.endswith('status.json'): raise;
         # else: return False;
         raise;
-    if not status: status = response.getcode()
+    try:
+        status;
+    except NameError:
+        status = response.getcode();
     if VERBOSE and 'status.json' not in r: logger('API Call executed - {}{}, Status code: {}'.format(API_TARGET, r, status));
     apiResponse = response.read().replace('null', 'None').replace('true', 'True').replace('false', 'False')
     if apiResponse != '':
@@ -1133,7 +1137,7 @@ def BatchWorkload(vms, duration, params):
     rData = { vm['id'] : Job('GetVMWorkloadLog', vm).run() for vm in vms }
     return rData;
 
-def stallUntilOnline(vms, timeout=3600, bTime=None):
+def stallUntilOnline(vms, timeout=300, bTime=None):
     if type(vms) is dict:
         vm_ids = {vms['id']:False}
     elif type(vms) is int or type(vms) is long:
@@ -1736,7 +1740,19 @@ def runBatchesTest(batchSize, restartParams=False):
         stat = Job('VMStatus', vm_id=vm['id']).run()
         if stat['booted'] == False:
             Job('StartVM', vm_id=vm['id']).run()
-    stallUntilOnline(vms, 240)
+    try:
+        stallUntilOnline(vms)
+    except OnappException as err:
+        print "Waiting for virtual machines {} to come online failed, trying to start once more.".format([vm['id'] for vm in vms])
+        tmpJobs = [ Job('UnlockVM', vm_id=vm['id']) for vm in vms ]
+        runParallel(tmpJobs);
+        tmpJobs = [ Job('StartVM', vm_id=vms['id']) for vm in vms ]
+        runParallel(tmpJobs);
+        try:
+            stallUntilOnline(vms)
+        except OnappException as err:
+            print "!!!!! A virtual machine has failed to start thrice! Please Investigate Control Server !!!!!!!"
+            raise;
     if using_vm_network: runParallel([Job('CopyWorkloadFile', vm) for vm in vms])
     if run_pre_burnin_test: BatchWorkload(vms, defData['ddparams'], run_pre_burnin_test)
     beginTime = datetime.datetime.now();
@@ -1774,7 +1790,19 @@ def runBatchesTest(batchSize, restartParams=False):
         #     if stat['booted'] == False:
         #         logger('Starting VM ID {0}'.format(vm['id']))
         #         Job('StartVM', vm_id=vm['id']).run()
-        stallUntilOnline(vms)
+        try:
+            stallUntilOnline(vms)
+        except OnappException as err:
+            print "Waiting for virtual machines {} to come online failed, trying to start once more.".format([vm['id'] for vm in vms])
+            tmpJobs = [ Job('UnlockVM', vm_id=vm['id']) for vm in vms ]
+            runParallel(tmpJobs);
+            tmpJobs = [ Job('StartVM', vm_id=vms['id']) for vm in vms ]
+            runParallel(tmpJobs);
+            try:
+                stallUntilOnline(vms)
+            except OnappException as err:
+                print "!!!!! A virtual machine has failed to start thrice! Please Investigate Control Server !!!!!!!"
+                raise;
         jobs = generateJobsBatch(vms, batchSize, defData);
         print "Batch ID {}, # of Jobs: {}".format(batchNum, len(jobs))
         if VERBOSE:
