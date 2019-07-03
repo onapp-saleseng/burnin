@@ -27,6 +27,7 @@ LOG_FILE = 'burnin.{}-{}-{}_{}{}.log'.format(now.year, now.month, now.day, now.h
 # DATA_FILE = 'workload.dat'
 API_TARGET = 'http://127.0.0.1'
 SSH_OPTIONS="-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30"
+
 DATA_FILE="burninIOPSResults.data"
 BATCHES_OUTPUT_FILE="batches.data"
 CONFIG_FILE="burnin.pyconf"
@@ -1558,9 +1559,9 @@ def createWorkerVMs(count, hvs, templ, datast, jd): # should be named createWork
     if False in vms:
         print "!!!! Virtual machines failed to create or got invalid API response, please investigate."
         raise OnappException(jd_tmp, 'createWorkerVMs', "Invalid API Response for CreateVMs")
-    print 'Sleeping for a few seconds before checking VM status...'
-    time.sleep(30)
-    stallUntilOnline(vms)
+    print 'Sleeping for a 3 minutes before checking VM status...allowing 20 minutes for VM creation after'
+    time.sleep(180)
+    stallUntilOnline(vms, timeout=1200)
     print('Storing VMs created in testVMs.')
     testVMs = vms;
     print str(testVMs)
