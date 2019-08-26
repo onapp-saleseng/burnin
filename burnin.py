@@ -457,6 +457,7 @@ def VMStatus(data):
     r = apiCall(url);
     return r
 
+
 def CreateVM(data):
     reqKeys = [
       'memory', 'cpus', 'cpu_shares',
@@ -570,6 +571,11 @@ def GetDiskIOPS(data):
     r = apiCall(url)
     return r;
 
+def ListNetworks(data=None):
+    url = '/settings/networks.json'
+    r = apiCall(url);
+    return r;
+
 def HealthcheckVM(data):
     d={}
     if type(data) is dict:
@@ -633,6 +639,20 @@ def getTemplate():
     while not tm.isdigit() and tm not in avail_templates.keys(): tm = raw_input('Not an ID. Provide ID: ');
     t = avail_templates[int(tm)]
     return int(tm);
+
+def getNetwork():
+    if use_existing_virtual_machines: return 0;
+    if VERBOSE: print('Checking networks.');
+    networksList = ListNetworks();
+    if len(networksList) == 1:
+        print('Found one network. Using this.')
+        return networksList[0]['id'];
+    print('Found multiple possible networks:')
+    for network in networksList:
+        print('{:>3}. {}'.format(network['id'], network['label']))
+    net = raw_input('Provide network to use: ');
+    while not net.isdigit() and net not in [x['id'] for x in networksList]: net = raw_input('Not an ID. Provide ID: ');
+    return int(net);
 
 def dRunQuery(q, unlist=True):
     db = dbConn();
@@ -1538,7 +1558,7 @@ def getDatastore(hv_zone):
             chosen_id = raw_input("Invalid. Please provide ID of data store zone to use: ")
         return chosen_id
 
-def createWorkerVMs(count, hvs, templ, datast, jd): # should be named createWorkerVeez
+def createWorkerVMs(count, hvs, templ, datast, network_id, jd):
     global testVMs
     jobs = [];
     for i in xrange(int(count)):
@@ -1546,7 +1566,7 @@ def createWorkerVMs(count, hvs, templ, datast, jd): # should be named createWork
             jd_tmp = {'hypervisor_id':hv['id'], 'template_id':templ, \
             'data_store_group_primary_id':datast, 'data_store_group_swap_id':datast, \
             'hostname':'burninTesting{}on{}'.format(i,re.sub(r'[^a-zA-Z0-9]', '', hv['label'])), \
-            'label':'burnin{}at{}'.format(i,hv['label']), \
+            'label':'burnin{}at{}'.format(i,hv['label']), 'network_id':network_id \
             }
             tmp = jd_tmp.copy()
             jd_tmp.update(jd);
@@ -1559,9 +1579,9 @@ def createWorkerVMs(count, hvs, templ, datast, jd): # should be named createWork
     if False in vms:
         print "!!!! Virtual machines failed to create or got invalid API response, please investigate."
         raise OnappException(jd_tmp, 'createWorkerVMs', "Invalid API Response for CreateVMs")
-    print 'Sleeping for a 3 minutes before checking VM status...allowing 20 minutes for VM creation after'
+    print 'Sleeping for a 3 minutes before checking VM status...allowing 60 minutes for VM creation after'
     time.sleep(180)
-    stallUntilOnline(vms, timeout=1200)
+    stallUntilOnline(vms, timeout=3600)
     print('Storing VMs created in testVMs.')
     testVMs = vms;
     print str(testVMs)
@@ -1642,12 +1662,14 @@ def runBatchesTest(batchSize, restartParams=False):
         if restartParams['defData']['vm_params'] != 0:
             t = restartParams['defData']['vm_params']['template_id']
             ds = restartParams['defData']['datastore_zone_id']
+            network_id = restartParams['defData']['network_id']
         else:
             t = 0
             ds = 0
     else:
         t = getTemplate();
         ds = getDatastore(HVZONE);
+        network_id = getNetwork();
     defData = {'resizetarget':DEFAULTS['resizetarget'], \
         'maxdisksize': DEFAULTS['maxdisksize'], \
         'wlduration': DEFAULTS['wlduration']};
@@ -1736,7 +1758,7 @@ def runBatchesTest(batchSize, restartParams=False):
         defData['vm_params'] = jd
         defData['vm_params']['template_id'] = t
         defData['datastore_zone_id'] = ds
-        vms = createWorkerVMs(nvms, hvs, t, ds, jd);
+        vms = createWorkerVMs(nvms, hvs, t, ds, network_id, jd);
     for vm in vms:
         stat = Job('VMStatus', vm_id=vm['id']).run()
         if stat['booted'] == False:
